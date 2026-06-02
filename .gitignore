@@ -1,0 +1,36 @@
+# build
+build/
+build-*/
+_deps/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.obj
+*.su
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# captures - these get large and are not source
+*.npz
+*.bin.gz
+captures/
+*.png
+
+# editors
+.vscode/
+.idea/
+*.swp
+.DS_Store

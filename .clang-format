@@ -1,0 +1,15 @@
+# Matches the style already in the tree: 4 spaces, 88 columns, K&R braces with
+# functions on their own line. Applied with:
+#   find firmware tests -name '*.[ch]' | xargs clang-format -i
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 88
+BreakBeforeBraces: Linux
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AlignConsecutiveMacros: AcrossEmptyLinesAndComments
+PointerAlignment: Right
+SortIncludes: false
