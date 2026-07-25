@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ads1256-host"
+version = "1.0.0"
+description = "Host-side decoder, capture tool and noise analysis for the STM32/ADS1256 DAQ"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Sharan" }]
+
+dependencies = [
+    "numpy>=1.21",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov"]
+plot = ["matplotlib>=3.5"]
+
+[project.scripts]
+ads1256 = "ads1256_host.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ads1256_host*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
