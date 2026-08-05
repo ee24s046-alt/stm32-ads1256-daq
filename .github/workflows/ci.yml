@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  firmware:
+    name: Firmware (arm-none-eabi, warnings as errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi cmake ninja-build
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-gcc.cmake \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      # The point of this step: the firmware is expected to build clean at
+      # -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Wcast-align.
+      # A new warning is a regression, so fail on one rather than letting it
+      # accumulate into noise nobody reads.
+      - name: Fail on any compiler warning
+        run: |
+          rm -rf build && cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-gcc.cmake \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build 2>&1 | tee out.log
+          # Linker notes about newlib's unimplemented _read/_write stubs are
+          # expected in a bare-metal --specs=nosys build and are not warnings
+          # about this code.
+          if grep -E "warning:" out.log | grep -v "is not implemented"; then
+            echo "::error::compiler warnings present"
+            exit 1
+          fi
+
+      - name: Report size
+        run: arm-none-eabi-size build/daq.elf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            build/daq.elf
+            build/daq.bin
+            build/daq.hex
+            build/daq.map
+
+  unit-tests:
+    name: Portable core (native, ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+      - name: Configure
+        run: cmake -B build-host -G Ninja -DDAQ_BUILD_HOST_TESTS=ON
+      - name: Build
+        run: cmake --build build-host
+      - name: Test
+        run: ctest --test-dir build-host --output-on-failure
+
+  host:
+    name: Host tooling
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: pip install -e "host[dev]"
+      - name: Test
+        run: cd host && python -m pytest -q
+      - name: End-to-end decode path against the simulator
+        run: ads1256 selftest
