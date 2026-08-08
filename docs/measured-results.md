@@ -1,10 +1,14 @@
 # Measured results
 
-> **Provenance.** Every number below came from a bench run on the author's unit,
-> not from a simulation and not from a datasheet. Each section states the exact
-> command that produces it, so any claim here can be re-derived on another unit
-> in a few minutes. If you are reading this as a reviewer, the reproduction
-> commands are the point — please run them.
+> **Provenance.** Each section states the exact command that produces it, so
+> every claim here can be re-derived on another unit in a few minutes. If you
+> are reading this as a reviewer, the reproduction commands are the point —
+> please run them, and see [evidence.md](evidence.md) for the captured artifact
+> behind each one.
+>
+> **A figure in this document is a measurement only once the corresponding item
+> in [evidence.md](evidence.md) is ticked.** Until then it is a prediction
+> derived from the datasheet and the clock constants, and should be read as one.
 >
 > Firmware: `Release`, `-O2`, FreeRTOS V11.1.0.
 > Hardware: STM32F4-Discovery + ADS1256 module, 7.68 MHz CLKIN, 2.5 V reference,

@@ -23,11 +23,22 @@ htmlcov/
 .venv/
 venv/
 
-# captures - these get large and are not source
+# working captures get large and are not source
 *.npz
-*.bin.gz
-captures/
-*.png
+captures/*
+
+# ...but the committed evidence artifacts ARE source: they are what lets a
+# reader reproduce the numbers in docs/measured-results.md.  Note the
+# captures/* form above rather than captures/ - git cannot re-include a file
+# inside an excluded *directory*, so the directory itself must stay listed.
+!captures/reference/
+!captures/reference/*.npz
+!captures/reference/*.bin
+!docs/img/
+!docs/img/*.png
+!docs/img/*.jpg
+!hardware/**/*.pdf
+!hardware/**/*.png
 
 # editors
 .vscode/

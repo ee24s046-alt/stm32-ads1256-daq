@@ -45,6 +45,29 @@ Full detail, with reproduction commands, in
 | Stack high-water, worst task | 51.0 % of allocated |
 | Flash / RAM | 23.1 KB / 11.0 KB + 12.0 KB CCM |
 
+## Evidence
+
+Those are measurements, so each one has an artifact behind it rather than a
+claim in prose. [`docs/evidence.md`](docs/evidence.md) lists every artifact, the
+exact command or instrument setup that produces it, and where it lives:
+
+| Artifact | Backs |
+|---|---|
+| [`docs/evidence/stats-300s.txt`](docs/evidence/) | deadline misses, CPU split, stack high-water, ring watermarks |
+| [`docs/img/la-drdy-to-cs.png`](docs/img/) | logic-analyser capture of `/DRDY` → `/CS`, with cursors |
+| [`docs/img/la-scan-window.png`](docs/img/) | one full 133 µs window, SPI decoder enabled |
+| [`docs/img/noise-shorted.png`](docs/img/) | time series and noise density, all four channels |
+| [`captures/reference/`](captures/reference/) | a 10 s raw capture, so a reader can re-derive the numbers |
+| [`docs/evidence/fault-example.txt`](docs/evidence/) | the fault handler's decoded output for a deliberate fault |
+
+The reference capture is the one worth noting: it means you do not have to take
+any of the above on trust.
+
+```bash
+ads1256 verify captures/reference/shorted-10s.npz
+ads1256 noise  captures/reference/shorted-10s.npz
+```
+
 ## Quick start
 
 ```bash
@@ -132,7 +155,12 @@ firmware/
   startup/        vector table and reset handler
 tests/            native unit tests over firmware/lib, ASan + UBSan
 host/             Python package: decoder, capture, noise analysis, CLI, pytest
+hardware/         interconnect diagram, schematic and design notes
+captures/         reference capture, committed so the numbers are reproducible
+tools/            collect-evidence.sh - regenerates the host-side artifacts
 docs/             architecture, protocol, timing, calibration, results, bring-up
+  img/            logic-analyser captures, noise plot, bench photograph
+  evidence/       raw terminal output behind every measured claim
 cmake/            arm-none-eabi toolchain file
 ```
 
@@ -143,8 +171,10 @@ cmake/            arm-none-eabi toolchain file
 - **[protocol.md](docs/protocol.md)** — wire format, framing, loss detection
 - **[calibration.md](docs/calibration.md)** — correction model and the flash log
 - **[measured-results.md](docs/measured-results.md)** — bench numbers and how to reproduce them
+- **[evidence.md](docs/evidence.md)** — the artifact behind each number, and how to capture it
 - **[bringup.md](docs/bringup.md)** — flashing, first light, failure modes in order
 - **[hardware.md](docs/hardware.md)** — pin map, clock tree, analogue notes
+- **[hardware/](hardware/)** — interconnect, schematic and front-end design notes
 
 ## Third-party
 

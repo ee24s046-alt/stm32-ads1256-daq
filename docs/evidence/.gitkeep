@@ -1,0 +1,10 @@
+Text artifacts referenced from docs/evidence.md:
+
+  stats-300s.txt        the `stats` dump after a 300 s streaming run
+  verify.txt            output of `ads1256 verify` on the reference capture
+  noise.txt             output of `ads1256 noise` on the characterisation run
+  fault-example.txt     the fault handler's decoded output for a deliberate fault
+  cal-persistence.txt   boot banners before and after a power cycle
+
+Paste these verbatim. Rounded numbers read as estimates; odd ones read as
+measurements, because that is what they are.

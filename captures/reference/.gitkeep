@@ -1,0 +1,14 @@
+A short reference capture, committed so that a reader can reproduce the
+headline numbers from real data:
+
+  shorted-10s.npz   ~20000 scans, all inputs shorted at the connector
+  shorted-10s.bin   the raw undecoded byte stream behind it
+
+    ads1256 verify captures/reference/shorted-10s.npz
+    ads1256 noise  captures/reference/shorted-10s.npz
+
+Keep this one short - about 10 s, ~500 KB. Long runs stay out of git.
+
+The raw .bin is committed alongside the decoded .npz on purpose: if the decoder
+later turns out to be wrong, raw bytes can be re-analysed, whereas decoded
+samples already have the mistake baked into them.
