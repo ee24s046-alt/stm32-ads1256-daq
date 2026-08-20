@@ -22,16 +22,18 @@ $ cmake --build build && arm-none-eabi-size build/daq.elf
 
 | Region | Used | Available | Share |
 |---|---:|---:|---:|
-| FLASH (sectors 0–10) | 23 160 B | 896 KB | 2.5 % |
+| FLASH (sectors 0–10) | 40 296 B | 896 KB | 4.4 % |
 | CALSTORE (sector 11) | 0 B live | 128 KB | calibration log |
-| SRAM1+2 | 11 032 B | 128 KB | 8.4 % |
-| CCM | 12 288 B | 64 KB | 18.8 % |
+| SRAM1+2 | 41 288 B | 128 KB | 31.5 % |
+| CCM | 26 784 B | 64 KB | 40.9 % |
 
-`text 23080 / data 24 / bss 23304`.
+`text 40136 / data 104 / bss 67976`.
 
-The 12 KB of CCM is the two ring buffers (256 × 20 B + 256 × 24 B). There is no
-heap: `configSUPPORT_DYNAMIC_ALLOCATION` is 0 and no `heap_*.c` is linked, so
-these figures are the complete worst case rather than a snapshot.
+CCM holds the four ring buffers; SRAM holds the DSP working set — the Welch
+staging buffer, the power accumulator, the PSD result and the FFT scratch, about
+16 KB of the 41 KB. There is no heap:
+`configSUPPORT_DYNAMIC_ALLOCATION` is 0 and no `heap_*.c` is linked, so these
+figures are the complete worst case rather than a snapshot.
 
 ## 2. Real-time behaviour
 
@@ -43,11 +45,20 @@ these figures are the complete worst case rather than a snapshot.
 |---|---:|---:|---:|
 | `/DRDY` ISR, worst case | 1.21 µs | 133 µs | 110× |
 | ISR → sampler scheduled | 2.9 µs | — | — |
-| sampler SPI sequence, worst case | 61.4 µs | 133 µs | 2.2× |
-| **`/DRDY` → sample in ring, worst case** | **65.5 µs** | **133 µs** | **2.0×** |
-| processor, per scan | 11.4 µs | 137 ms | — |
+| sampler SPI sequence, muxed, worst case | 61.4 µs | 133 µs | 2.2× |
+| **`/DRDY` → sample in ring, muxed** | **65.5 µs** | **133 µs** | **2.0×** |
+| sampler SPI sequence, wideband, worst case | 26.8 µs | 33.3 µs | 1.24× |
+| **`/DRDY` → sample in ring, wideband** | **30.9 µs** | **33.3 µs** | **1.08×** |
+| processor, per scan (incl. decimation) | 13.8 µs | 137 ms | — |
 | uplink, per 16-packet burst | 40.2 µs | ~1 ms | — |
+| 1024-point FFT + PSD finalise | 312 µs | none (prio 1) | — |
 | **deadline misses over 300 s** | **0** | — | — |
+
+The wideband figure is the tight one and that is inherent: parking the
+multiplexer removes the ADS1256's settling penalty and quadruples the sample
+rate, but the SPI bus did not get any faster. 1.08× is thin margin, which is
+exactly why wideband is a mode rather than the default — and why the driver uses
+RDATAC there (3 bytes per `/DRDY`) instead of RDATA (4).
 
 562 500 scans were acquired in 300 s (1875.0 /s against a nominal 1875.0),
 2 250 000 `/DRDY` interrupts serviced, zero late.
@@ -56,14 +67,18 @@ these figures are the complete worst case rather than a snapshot.
 
 FreeRTOS run-time statistics, TIM2 at 1 MHz, same 300 s run:
 
-| Task | Share |
-|---|---:|
-| sampler | 46.2 % |
-| processor | 2.1 % |
-| uplink | 0.5 % |
-| housekeeping | 0.1 % |
-| kernel tick + switches | 1.4 % |
-| **IDLE** | **49.7 %** |
+| Task | Muxed | Wideband |
+|---|---:|---:|
+| sampler | 46.2 % | 80.5 % |
+| processor | 2.1 % | 4.3 % |
+| uplink | 0.5 % | 1.9 % |
+| metrics | 0.3 % | 0.3 % |
+| housekeeping | 0.1 % | 0.1 % |
+| kernel tick + switches | 1.4 % | 1.6 % |
+| **IDLE** | **49.4 %** | **11.3 %** |
+
+The metrics task costs 0.3 % in both modes: a 1024-point FFT is 312 µs and it
+runs roughly twice a second.
 
 The idle hook is `WFI`, so this is real headroom, not a spin loop. Most of the
 sampler's share is waiting on SPI status flags rather than computing — see
@@ -78,8 +93,9 @@ worse here, not better.
 | Task | Allocated | Peak used | Used |
 |---|---:|---:|---:|
 | sampler | 256 words | 104 | 40.6 % |
-| processor | 256 words | 118 | 46.1 % |
+| processor | 384 words | 173 | 45.1 % |
 | uplink | 384 words | 196 | 51.0 % |
+| metrics | 512 words | 264 | 51.6 % |
 | housekeeping | 512 words | 231 | 45.1 % |
 | idle | 128 words | 51 | 39.8 % |
 | timer service | 192 words | 78 | 40.6 % |
@@ -168,18 +184,87 @@ by cutting power mid-program left a slot with a bad CRC, which the boot scan
 skipped, falling back to the previous record — the intended behaviour, and the
 reason the log is append-only rather than erase-and-rewrite.
 
-## 8. Host-side verification
+## 8. Signal processing
+
+Unlike the sections above, **these numbers are computed and test-verified rather
+than bench-measured** — they are properties of the filter design and the
+arithmetic, not of the hardware, so they are reproducible on any machine:
+
+```
+$ python3 tools/design_filter.py
+$ ads1256 dsp
+```
+
+### Decimation filter
+
+| Property | Value |
+|---|---|
+| Taps | 68 (17 per polyphase branch) |
+| Rate | 30 000 → 7500 Hz, M = 4 |
+| −3 dB corner | 3501 Hz |
+| Passband droop, DC–3 kHz | 0.06 dB |
+| **Worst-case alias rejection into DC–3 kHz** | **55.6 dB** (requirement: >40 dB) |
+| Measured on a 6 kHz tone (folds to 1500 Hz) | 58.3 dB rejected |
+| Same tone, no anti-alias filter (control) | **0.0 dB** rejected |
+| MAC rate, polyphase | 510 kMAC/s |
+| MAC rate, naive filter-then-discard | 2.04 MMAC/s |
+
+The control line is the one that matters: without the filter, a 6 kHz input
+arrives in the output at full amplitude and sitting at 1500 Hz, where nothing
+downstream can distinguish it from real signal.
+
+### Fixed-point fidelity
+
+| Comparison | Result |
+|---|---|
+| vs. float using the same Q15 taps | max 0.499 codes — half-LSB rounding only |
+| vs. float using ideal taps | 16.0 codes RMS on a 199 252-code signal |
+| …as a relative error | 8.0 × 10⁻⁵, ≈70 dB below the data |
+
+The first row says the integer path is exact. The second says the residual is
+the Q15 tap quantisation — a property of the representation, chosen knowingly,
+not a defect in the implementation.
+
+### Spectral estimation
+
+| Estimator | Bin scatter |
+|---|---:|
+| 1024-point, 1 average | 5.37 dB |
+| 16384-point, 1 average | 5.56 dB |
+| 1024-point, 6 averages (Welch) | **2.00 dB** |
+
+A 16× longer transform gives 16× the frequency resolution and **no** variance
+reduction, exactly as theory says: a periodogram bin is exponentially
+distributed with standard deviation equal to its mean, ~5.57 dB, independent of
+length. Averaging six 50 %-overlapped segments cuts it by 2.7× (slightly short
+of √6 because overlapped Hann segments are not fully independent).
+
+### THD+N
+
+| Signal | Reported |
+|---|---|
+| Clean 1 kHz tone | < −55 dB (window-leakage limited, see [dsp.md](dsp.md#thdn-and-its-floor)) |
+| 1 kHz + 5 % third harmonic | −25.3 dB (expected ≈ −26 dB) |
+| Shorted input, no tone | **INVALID** — the device declines to report |
+
+## 9. Host-side verification
 
 ```
 $ cmake -B build-host -DDAQ_BUILD_HOST_TESTS=ON && cmake --build build-host
 $ ctest --test-dir build-host --output-on-failure
-100% tests passed, 0 tests failed out of 3
+100% tests passed, 0 tests failed out of 6
 
 $ cd host && python -m pytest -q
-24 passed
+43 passed
 ```
 
 The C tests compile the *same* `firmware/lib/*.c` the image links, under
 AddressSanitizer and UndefinedBehaviorSanitizer — including the ring-buffer index
 wrapping past 2³², which on a continuously streaming device happens after about
 six days and is otherwise essentially untestable.
+
+The DSP is checked twice over, in two languages, against one generated vector:
+`tools/design_filter.py` emits the taps, the C header, the host's JSON and a
+golden input/output pair, and both `tests/test_fir_decimate.c` and
+`host/tests/test_dsp.py` assert the same expected output. See
+[dsp.md](dsp.md#verification) for the full map of claim to test.

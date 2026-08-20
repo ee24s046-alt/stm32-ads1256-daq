@@ -20,7 +20,7 @@ if(DAQ_SANITIZE AND NOT MSVC)
     list(APPEND DAQ_TEST_LINK  -fsanitize=address,undefined)
 endif()
 
-foreach(t test_spsc_ring test_packet test_calibration)
+foreach(t test_spsc_ring test_packet test_calibration test_fir_decimate test_spectral test_metrics)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE daq_core)
     target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

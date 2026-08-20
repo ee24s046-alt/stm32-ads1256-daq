@@ -49,6 +49,19 @@
 #define DAQ_SCAN_RATE_SPS       (DAQ_SAMPLE_DELIVERY_SPS / DAQ_NUM_CHANNELS) /* 1875 */
 #define DAQ_SCAN_PERIOD_US      (DAQ_DRDY_PERIOD_US * DAQ_NUM_CHANNELS)      /* 532 */
 
+/**
+ * /DRDY period in the single-channel wideband mode.
+ *
+ * With the multiplexer parked there is no filter restart and therefore no
+ * settling penalty, so every conversion is usable and /DRDY arrives at the full
+ * DRATE: 33 us.  That is a 4x tighter deadline than the muxed mode and it is
+ * the reason wideband is a mode rather than the default.
+ */
+#define DAQ_WIDEBAND_PERIOD_US  (1000000U / DAQ_ADC_DATA_RATE_SPS)           /* 33 */
+
+/** Decimated output rate in wideband mode, after the M=4 anti-alias filter. */
+#define DAQ_WIDEBAND_OUT_SPS    (DAQ_ADC_DATA_RATE_SPS / 4U)                 /* 7500 */
+
 /* -------------------------------------------------------------------------
  * Stage 1 -> Stage 2 element: one completed 4-channel scan, uncorrected.
  * ---------------------------------------------------------------------- */
@@ -78,5 +91,70 @@ typedef struct {
 /** Full-scale magnitude of a 24-bit two's complement code. */
 #define DAQ_CODE_FULL_SCALE  8388607L   /* 2^23 - 1 */
 #define DAQ_CODE_MIN        -8388608L   /* -2^23    */
+
+/* -------------------------------------------------------------------------
+ * Acquisition modes
+ *
+ * The two modes exist because the ADS1256's settling penalty applies per MUX
+ * change, not per conversion.  Parking the multiplexer removes it entirely.
+ * ---------------------------------------------------------------------- */
+typedef enum {
+    /**
+     * Four differential pairs, MUX cycled every conversion.
+     * 30 kSPS DRATE / 4 settling periods = 7500 settled conversions/s,
+     * /4 channels = 1875 complete scans/s.  /DRDY every 133 us.
+     */
+    DAQ_MODE_MUX4 = 0,
+
+    /**
+     * One differential pair, multiplexer parked, RDATAC continuous read.
+     * No MUX change means no settling penalty, so every conversion is usable:
+     * a true 30 kSPS, /DRDY every 33.3 us.  The on-device decimator then takes
+     * it to 7.5 kSPS with proper anti-aliasing (see fir_coeffs.h).
+     *
+     * This is the mode the DSP chain is specified for, and the only one in
+     * which the numbers work: M = 4 from 30 kSPS gives a 3750 Hz output
+     * Nyquist, which is what makes a 3.5 kHz anti-alias corner meaningful.
+     * Decimating the muxed mode's 1875 Hz per-channel stream by 4 would put
+     * the output Nyquist at 234 Hz and that corner would alias badly.
+     */
+    DAQ_MODE_WIDEBAND = 1,
+} daq_mode_t;
+
+/* -------------------------------------------------------------------------
+ * Record types on the wire.
+ *
+ * All records share the 0xA5 first sync byte; the second byte identifies the
+ * type and fixes the length, so the host needs no length field and the
+ * existing 24-byte sample record is untouched.  See docs/protocol.md.
+ * ---------------------------------------------------------------------- */
+#define DAQ_SYNC1_SAMPLE   0x5AU   /**< 24 bytes   */
+#define DAQ_SYNC1_METRICS  0x5BU   /**< 64 bytes   */
+#define DAQ_SYNC1_PSD      0x5CU   /**< 1044 bytes */
+
+#define DAQ_METRICS_BYTES  64U
+#define DAQ_PSD_BINS       513U    /**< 1024-point FFT, DC..Nyquist inclusive */
+#define DAQ_PSD_BYTES      (18U + (DAQ_PSD_BINS * 2U))   /* 1044 */
+#define DAQ_MAX_RECORD_BYTES DAQ_PSD_BYTES
+
+/** Live metrics, computed on-device.  See metrics.h for the method. */
+typedef struct {
+    int32_t  rms[DAQ_NUM_CHANNELS];       /**< codes, 100 ms window          */
+    int32_t  thdn_mdb[DAQ_NUM_CHANNELS];  /**< milli-dB, INT32_MIN = invalid */
+    uint32_t fund_mhz[DAQ_NUM_CHANNELS];  /**< milli-Hz, 0 = no tone found   */
+    uint32_t psd_serial;
+    uint32_t t_us;
+    uint16_t seq;
+    uint8_t  mode;
+} daq_metrics_rec_t;
+
+/** One averaged power spectrum for one channel. */
+typedef struct {
+    int16_t  bin_dbfs_x100[DAQ_PSD_BINS];
+    uint32_t fs_mhz;                      /**< rate of the analysed stream   */
+    uint32_t t_us;
+    uint16_t seq;
+    uint8_t  channel;
+} daq_psd_rec_t;
 
 #endif /* DAQ_TYPES_H */

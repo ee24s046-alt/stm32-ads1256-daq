@@ -1,0 +1,29 @@
+==================================================================
+ Decimation filter  (firmware/include/fir_coeffs.h)
+==================================================================
+  taps                : 68 (17 per polyphase branch)
+  rate                : 30000 Hz -> 7500 Hz   (M = 4)
+  -3 dB corner        : 3501 Hz
+  passband droop      : 0.06 dB to 3 kHz
+  alias rejection     : 55.6 dB (design, worst case into DC..3 kHz)
+
+  fixed-point arithmetic : max 0.499 codes vs the same taps in float
+                           (half-LSB rounding only - the integer path is exact)
+  Q15 tap quantisation   : 16.0 codes RMS on a 199252-code signal
+                           = 8.0e-05 relative, ~70 dB below the data
+
+  6 kHz tone folds to 1500 Hz after M=4 decimation:
+    with anti-alias   :  58.3 dB rejected
+    naive downsample  :   0.0 dB rejected  <- indistinguishable from real signal
+
+==================================================================
+ Spectral estimation  (firmware/lib/metrics.c)
+==================================================================
+  1024-pt, 1 average  :  5.37 dB scatter
+  16384-pt, 1 average :  5.56 dB scatter   <- 16x the resolution, no better
+  1024-pt, 6 averages :  2.00 dB scatter   <- 2.7x better
+
+  Variance falls with the number of AVERAGES, not with transform
+  length. That is the whole reason Welch's method exists.
+
+plot written to ../docs/img/dsp-demo.png

@@ -42,7 +42,7 @@ echo "=============================================================="
 read -r
 
 # ---------------------------------------------------------------- reference
-echo "[1/3] 10 s reference capture (committed to the repo) ..."
+echo "[1/4] 10 s reference capture (committed to the repo) ..."
 ads1256 capture --port "$PORT" --packets 20000 \
         --out captures/reference/shorted-10s.npz \
         --raw captures/reference/shorted-10s.bin
@@ -51,13 +51,17 @@ echo "      verifying ..."
 ads1256 verify captures/reference/shorted-10s.npz | tee docs/evidence/verify.txt
 
 # ---------------------------------------------------------------- long run
-echo "[2/3] ${SECONDS_LONG} s characterisation run ..."
+echo "[2/4] ${SECONDS_LONG} s characterisation run ..."
 ads1256 capture --port "$PORT" --seconds "$SECONDS_LONG" --out /tmp/shorted-long.npz
 
 # ---------------------------------------------------------------- analysis
-echo "[3/3] noise analysis + plot ..."
+echo "[3/4] noise analysis + plot ..."
 ads1256 noise /tmp/shorted-long.npz --plot docs/img/noise-shorted.png \
     | tee docs/evidence/noise.txt
+
+# ---------------------------------------------------------------- DSP
+echo "[4/4] DSP verification (needs no hardware) ..."
+ads1256 dsp --plot docs/img/dsp-demo.png | tee docs/evidence/dsp.txt
 
 cat <<'EOF'
 

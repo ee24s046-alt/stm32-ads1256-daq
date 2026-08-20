@@ -69,6 +69,25 @@ jobs:
       - name: Test
         run: ctest --test-dir build-host --output-on-failure
 
+  coefficients:
+    name: Generated filter coefficients are in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      # firmware/include/fir_coeffs.h and host/ads1256_host/fir_coeffs.json are
+      # generated. If someone hand-edits either, the firmware and the host
+      # reference stop agreeing and the cross-check that validates both becomes
+      # meaningless - silently. Regenerate and fail on any diff.
+      - name: Regenerate and diff
+        run: |
+          python3 tools/design_filter.py
+          git diff --exit-code -- firmware/include/fir_coeffs.h \
+                                  host/ads1256_host/fir_coeffs.json
+
   host:
     name: Host tooling
     runs-on: ubuntu-latest
@@ -86,3 +105,5 @@ jobs:
         run: cd host && python -m pytest -q
       - name: End-to-end decode path against the simulator
         run: ads1256 selftest
+      - name: DSP chain verification
+        run: ads1256 dsp

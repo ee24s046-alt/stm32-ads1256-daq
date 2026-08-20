@@ -120,4 +120,31 @@ void ads1256_drdy_irq_enable(bool enable);
 /** @brief MUX register value that selects differential pair @p ch. */
 uint8_t ads1256_mux_for_channel(uint32_t ch);
 
+/**
+ * @brief Switch between 4-channel muxed and single-channel wideband acquisition.
+ *
+ * DAQ_MODE_WIDEBAND parks the multiplexer and enters RDATAC. With no MUX change
+ * there is no filter restart, so the settling penalty vanishes and every
+ * conversion is usable: /DRDY every 33.3 us at DRATE = 30 kSPS.
+ *
+ * The cost is in the deadline. The muxed mode has 133 us to move 9 bytes; the
+ * wideband mode has 33.3 us to move 3, which after the mandatory 6.5 us t6
+ * delay leaves roughly 26.8 us of work in a 33.3 us window - 80 % utilisation
+ * against the muxed mode's 46 %. That is the real price of the extra bandwidth
+ * and it is why the wideband mode is a mode rather than the default.
+ */
+ads_status_t ads1256_set_mode(daq_mode_t mode);
+
+/** @brief Current acquisition mode. */
+daq_mode_t ads1256_get_mode(void);
+
+/**
+ * @brief Read one conversion in RDATAC mode - 3 bytes, no command byte.
+ *
+ * Only valid in DAQ_MODE_WIDEBAND. Continuous-read mode is what makes the
+ * 33.3 us deadline achievable at all: issuing RDATA first would add another
+ * 6.1 us of SPI to a window that has 6.5 us of slack.
+ */
+void ads1256_read_continuous(int32_t *out_code);
+
 #endif /* ADS1256_H */

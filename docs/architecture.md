@@ -39,9 +39,21 @@ answer to holding both at once.
                                                     host
 ```
 
-A fourth task, `housekeeping` (priority 1), owns the heartbeat LED, the command
-parser and the statistics dump. It is deliberately the lowest-priority thing in
-the system: diagnostics must never be able to delay acquisition.
+Two service tasks sit alongside the three-stage data path, both at priority 1 -
+deliberately the lowest things in the system above idle, because neither may
+ever delay acquisition:
+
+- `housekeeping` owns the heartbeat LED, the command parser and the statistics
+  dump.
+- `metrics` owns the on-device DSP: RMS, the averaged PSD and THD+N. It is fed a
+  third ring by the processor and emits its own records into a fourth, which the
+  uplink drains alongside the sample packets. It is also the only FPU user in
+  the firmware - see [dsp.md](dsp.md#float-fft-fixed-point-filter) for why that
+  isolation matters.
+
+In `DAQ_MODE_WIDEBAND` the processor additionally runs an M=4 polyphase
+anti-alias decimator, which is what takes the 30 kSPS single-channel stream down
+to a 180 kB/s link rate. See [dsp.md](dsp.md).
 
 ## Why three tasks and not one
 

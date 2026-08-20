@@ -37,10 +37,12 @@
 extern volatile uint32_t g_clock_fallback_hsi;
 
 /* ---- Static task storage ------------------------------------------------ */
-static StaticTask_t s_tcb_sampler,   s_tcb_processor, s_tcb_uplink, s_tcb_house;
+static StaticTask_t s_tcb_sampler, s_tcb_processor, s_tcb_uplink;
+static StaticTask_t s_tcb_metrics, s_tcb_house;
 static StackType_t  s_stk_sampler[STACK_SAMPLER];
 static StackType_t  s_stk_processor[STACK_PROCESSOR];
 static StackType_t  s_stk_uplink[STACK_UPLINK];
+static StackType_t  s_stk_metrics[STACK_METRICS];
 static StackType_t  s_stk_house[STACK_HOUSEKEEP];
 
 static void task_housekeeping(void *arg);
@@ -155,12 +157,16 @@ int main(void)
     g_task_uplink = xTaskCreateStatic(task_uplink, "uplink", STACK_UPLINK,
                                       NULL, PRIO_UPLINK, s_stk_uplink,
                                       &s_tcb_uplink);
+    g_task_metrics = xTaskCreateStatic(task_metrics, "metrics", STACK_METRICS,
+                                       NULL, PRIO_METRICS, s_stk_metrics,
+                                       &s_tcb_metrics);
     (void)xTaskCreateStatic(task_housekeeping, "house", STACK_HOUSEKEEP,
                             NULL, PRIO_HOUSEKEEP, s_stk_house, &s_tcb_house);
 
     configASSERT(g_task_sampler != NULL);
     configASSERT(g_task_processor != NULL);
     configASSERT(g_task_uplink != NULL);
+    configASSERT(g_task_metrics != NULL);
 
     uart_puts("[rtos] starting scheduler\n\n");
     vTaskStartScheduler();
@@ -201,6 +207,43 @@ static void print_stats(void)
     uart_puts(" / "); uart_put_u32(RING_TX_SLOTS);
     uart_puts("   drops "); uart_put_u32(spsc_drops(&g_ring_tx)); uart_puts("\n");
 
+    uart_puts("--- DSP ----------------------------------------\n");
+    uart_puts("mode             : ");
+    uart_puts((g_mode == DAQ_MODE_WIDEBAND)
+              ? "WIDEBAND  1 ch @ 30 kSPS -> M=4 -> 7.5 kSPS\n"
+              : "MUX4      4 ch @ 1875 scans/s\n");
+    if (g_mode == DAQ_MODE_WIDEBAND) {
+        uart_puts("decimated out    : "); uart_put_u32(g_stats.decim_out);
+        uart_puts("\n");
+    }
+    uart_puts("PSD blocks       : "); uart_put_u32(g_stats.psd_blocks);
+    uart_puts("  (1024-pt, "); uart_put_u32(WELCH_SEGMENTS);
+    uart_puts(" averages, 50% overlap)\n");
+    uart_puts("PSD worst case   : ");
+    uart_put_u32(cyc_to_ns(g_stats.psd_service_max_cyc) / 1000U);
+    uart_puts(" us per block\n");
+    uart_puts("meta sent/dropped: "); uart_put_u32(g_stats.meta_sent);
+    uart_puts(" / "); uart_put_u32(g_stats.meta_dropped); uart_puts("\n");
+
+    for (uint32_t c = 0U; c < DAQ_NUM_CHANNELS; c++) {
+        if (!g_metrics.rms_valid[c]) {
+            continue;
+        }
+        uart_puts("  ch"); uart_put_u32(c);
+        uart_puts("  rms "); uart_put_i32(g_metrics.rms[c]);
+        uart_puts(" codes  ("); 
+        uart_put_u32((uint32_t)metrics_effective_bits(g_metrics.rms[c]));
+        uart_puts(" effective bits)");
+        if (g_metrics.thdn_mdb[c] != THDN_INVALID) {
+            uart_puts("  THD+N ");
+            uart_put_i32(g_metrics.thdn_mdb[c] / 1000);
+            uart_puts(" dB @ ");
+            uart_put_u32(g_metrics.fund_mhz[c] / 1000U);
+            uart_puts(" Hz");
+        }
+        uart_puts("\n");
+    }
+
     uart_puts("stack free (words, min since boot):\n");
     uart_puts("  sampler   "); uart_put_u32(uxTaskGetStackHighWaterMark(g_task_sampler));
     uart_puts(" / "); uart_put_u32(STACK_SAMPLER); uart_puts("\n");
@@ -208,6 +251,8 @@ static void print_stats(void)
     uart_puts(" / "); uart_put_u32(STACK_PROCESSOR); uart_puts("\n");
     uart_puts("  uplink    "); uart_put_u32(uxTaskGetStackHighWaterMark(g_task_uplink));
     uart_puts(" / "); uart_put_u32(STACK_UPLINK); uart_puts("\n");
+    uart_puts("  metrics   "); uart_put_u32(uxTaskGetStackHighWaterMark(g_task_metrics));
+    uart_puts(" / "); uart_put_u32(STACK_METRICS); uart_puts("\n");
     uart_puts("  idle      "); uart_put_u32(uxTaskGetStackHighWaterMark(xTaskGetIdleTaskHandle()));
     uart_puts(" / "); uart_put_u32(configMINIMAL_STACK_SIZE); uart_puts("\n");
     uart_puts("------------------------------------------------\n");
@@ -285,9 +330,36 @@ static void handle_command(const char *cmd)
         daq_cal_set_identity(&g_calibration);
         g_calibration_from_flash = false;
         uart_puts("[cal ] reset to identity (in RAM only)\n");
+    } else if ((strcmp(cmd, "mode mux") == 0) || (strcmp(cmd, "mode wide") == 0)) {
+        const daq_mode_t want = (strcmp(cmd, "mode wide") == 0)
+                              ? DAQ_MODE_WIDEBAND : DAQ_MODE_MUX4;
+
+        if (want == g_mode) {
+            uart_puts("[mode] already in that mode\n");
+        } else {
+            /* Stop streaming across the switch. The converter is reconfigured
+               and the decimator's delay line flushed; packets emitted during
+               that window would carry a mode label that no longer matches the
+               data behind them. */
+            const bool was = g_streaming;
+            g_streaming = false;
+            vTaskDelay(pdMS_TO_TICKS(20U));
+
+            if (ads1256_set_mode(want) == ADS_OK) {
+                g_mode = want;
+                vTaskDelay(pdMS_TO_TICKS(20U));
+                uart_puts((want == DAQ_MODE_WIDEBAND)
+                    ? "[mode] WIDEBAND: 1 channel, 30 kSPS, M=4 decimation "
+                      "-> 7.5 kSPS, 3.5 kHz anti-alias corner\n"
+                    : "[mode] MUX4: 4 channels, 1875 scans/s\n");
+            } else {
+                uart_puts("[mode] FAILED - converter did not acknowledge\n");
+            }
+            g_streaming = was;
+        }
     } else if (strcmp(cmd, "help") == 0) {
-        uart_puts("commands: run | stop | stats | cal zero | cal save | "
-                  "cal reset | help\n");
+        uart_puts("commands: run | stop | stats | mode mux | mode wide | "
+                  "cal zero | cal save | cal reset | help\n");
     } else if (cmd[0] != '\0') {
         uart_puts("[cmd ] unknown: '");
         uart_puts(cmd);

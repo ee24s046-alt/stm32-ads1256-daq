@@ -14,7 +14,8 @@ from typing import Iterator, Optional
 
 import numpy as np
 
-from .protocol import Packet, StreamDecoder, encode_packet
+from .protocol import (MetricsRecord, Packet, PsdRecord, StreamDecoder,
+                       encode_metrics, encode_packet, encode_psd)
 
 # One complete 4-channel scan every 532 us: the ADS1256 delivers a settled
 # conversion every 133 us at DRATE = 30 kSPS (4 filter settling periods), and
@@ -101,6 +102,8 @@ class SimulatedSource(ByteSource):
         self._t_us = 0
         self._pending = bytearray()
         self._emitted = 0
+        self._meta_seq = 0
+        self._psd_serial = 0
 
     def _next_packet(self) -> bytes:
         self._emitted += 1
@@ -126,8 +129,42 @@ class SimulatedSource(ByteSource):
         self._t_us = (self._t_us + SCAN_PERIOD_US) & 0xFFFFFFFF
         return bytes(frame)
 
+    def _next_metrics(self) -> bytes:
+        """A metrics record, as the device emits one every 100 ms."""
+        self._meta_seq += 1
+        rms = int(round(self._noise))
+        tone = self._tone_hz if self._tone_amp else None
+        thdn = -62.0 if self._tone_amp else None
+        return encode_metrics(MetricsRecord(
+            seq=self._meta_seq, t_us=self._t_us, mode=0,
+            rms=(rms,) * 4,
+            thdn_db=(thdn,) * 4,
+            fundamental_hz=(tone,) * 4,
+            psd_serial=self._psd_serial,
+        ))
+
+    def _next_psd(self) -> bytes:
+        """A PSD record, with a flat floor consistent with the noise level."""
+        self._psd_serial += 1
+        floor = 20.0 * np.log10(max(self._noise, 1e-9) / 8388607.0) - 10.0 * np.log10(
+            SCAN_PERIOD_US and 1875.0 / 2.0)
+        bins = np.full(513, floor) + self._rng.normal(0.0, 2.0, 513)
+        return encode_psd(PsdRecord(
+            seq=self._meta_seq, t_us=self._t_us,
+            channel=(self._psd_serial - 1) % 4,
+            fs_hz=1875.0, bins_dbfs=bins,
+        ))
+
     def read(self, max_bytes: int) -> bytes:
         while len(self._pending) < max_bytes:
+            # Interleave metrics and PSD records at roughly the device's rates:
+            # one metrics record per ~188 scans (100 ms) and one PSD block per
+            # ~900 (478 ms). Keeping the simulator's record mix realistic is
+            # what makes it a useful test of the host's framing.
+            if self._emitted and (self._emitted % 188 == 0):
+                self._pending += self._next_metrics()
+            if self._emitted and (self._emitted % 897 == 0):
+                self._pending += self._next_psd()
             self._pending += self._next_packet()
         out = bytes(self._pending[:max_bytes])
         del self._pending[:max_bytes]
@@ -163,11 +200,48 @@ def read_packets(
         if raw_sink is not None:
             raw_sink.write(data)
 
-        for pkt in decoder.feed(data):
-            yield pkt
+        for rec in decoder.feed(data):
+            # read_packets() yields sample packets only; metrics and PSD blocks
+            # are available on the decoder, or via read_records() below.
+            if not isinstance(rec, Packet):
+                continue
+            yield rec
             count += 1
             if limit is not None and count >= limit:
                 return
+
+
+def read_records(
+    source: ByteSource,
+    limit: Optional[int] = None,
+    duration_s: Optional[float] = None,
+    chunk: int = 4096,
+):
+    """Like read_packets(), but yields every record type.
+
+    ``limit`` counts sample packets, so a caller asking for 20000 samples gets
+    the metrics and PSD blocks that arrived alongside them rather than an
+    arbitrary slice.
+    """
+    decoder = StreamDecoder()
+    started = time.monotonic()
+    samples = 0
+
+    while True:
+        if duration_s is not None and (time.monotonic() - started) >= duration_s:
+            return
+        data = source.read(chunk)
+        if not data:
+            if isinstance(source, FileSource):
+                return
+            continue
+
+        for rec in decoder.feed(data):
+            yield rec
+            if isinstance(rec, Packet):
+                samples += 1
+                if limit is not None and samples >= limit:
+                    return
 
 
 def packets_to_arrays(packets):

@@ -20,9 +20,16 @@ static const uint8_t k_mux_table[DAQ_NUM_CHANNELS] = {
     0x67U,   /* AINP = AIN6, AINN = AIN7 */
 };
 
+static daq_mode_t s_mode = DAQ_MODE_MUX4;
+
 uint8_t ads1256_mux_for_channel(uint32_t ch)
 {
     return k_mux_table[ch & (DAQ_NUM_CHANNELS - 1U)];
+}
+
+daq_mode_t ads1256_get_mode(void)
+{
+    return s_mode;
 }
 
 static bool wait_drdy_low(uint32_t timeout_us)
@@ -177,6 +184,54 @@ ads_status_t ads1256_init(void)
     send_cmd(ADS_CMD_SYNC);
     send_cmd(ADS_CMD_WAKEUP);
     return ADS_OK;
+}
+
+ads_status_t ads1256_set_mode(daq_mode_t mode)
+{
+    ads1256_drdy_irq_enable(false);
+
+    /* Leave RDATAC before touching any register - the ADS1256 will happily
+       interpret a WREG opcode as the next data byte otherwise, and the
+       resulting desync survives until the next hardware reset. */
+    send_cmd(ADS_CMD_SDATAC);
+    delay_ns(ADS1256_T11_NS);
+
+    ads1256_write_reg(ADS_REG_MUX, ads1256_mux_for_channel(0U));
+    send_cmd(ADS_CMD_SYNC);
+    send_cmd(ADS_CMD_WAKEUP);
+
+    if (mode == DAQ_MODE_WIDEBAND) {
+        /* Wait out one settling period so the first continuous sample is
+           already valid, then hand the bus over to RDATAC. */
+        if (!wait_drdy_low(10000U)) {
+            ads1256_drdy_irq_enable(true);
+            return ADS_ERR_NO_DRDY;
+        }
+        send_cmd(ADS_CMD_RDATAC);
+        delay_ns(ADS1256_T11_NS);
+    }
+
+    s_mode = mode;
+    ads1256_drdy_irq_enable(true);
+    return ADS_OK;
+}
+
+void ads1256_read_continuous(int32_t *out_code)
+{
+    uint8_t rx[3];
+
+    CS_LOW();
+    /* t6 after the /DRDY edge, then the data phase. No command byte: in
+       RDATAC the converter presents each result unprompted. */
+    delay_ns(ADS1256_T6_NS);
+    rx[0] = spi1_xfer(0xFFU);
+    rx[1] = spi1_xfer(0xFFU);
+    rx[2] = spi1_xfer(0xFFU);
+    CS_HIGH();
+
+    *out_code = daq_sext24(((uint32_t)rx[0] << 16) |
+                           ((uint32_t)rx[1] << 8)  |
+                            (uint32_t)rx[2]);
 }
 
 void ads1256_read_and_advance(int32_t *out_code, uint32_t next_ch)

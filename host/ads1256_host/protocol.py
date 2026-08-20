@@ -28,10 +28,32 @@ from dataclasses import dataclass
 from typing import Iterator, List, Optional
 
 SYNC0 = 0xA5
-SYNC1 = 0x5A
+SYNC1 = 0x5A                 # sample record (kept as the historical name)
+SYNC1_SAMPLE = 0x5A
+SYNC1_METRICS = 0x5B
+SYNC1_PSD = 0x5C
 PROTO_VERSION = 0x01
 PACKET_BYTES = 24
+METRICS_BYTES = 64
+PSD_BINS = 513
+PSD_BYTES = 18 + PSD_BINS * 2       # 1044
 NUM_CHANNELS = 4
+
+#: Second sync byte -> total record length. The length is implied by the type
+#: rather than carried in a field, so a corrupted stream cannot lie about it and
+#: a receiver that does not understand a record still knows how far to skip.
+RECORD_LENGTHS = {
+    SYNC1_SAMPLE: PACKET_BYTES,
+    SYNC1_METRICS: METRICS_BYTES,
+    SYNC1_PSD: PSD_BYTES,
+}
+
+MODE_MUX4 = 0
+MODE_WIDEBAND = 1
+MODE_NAMES = {MODE_MUX4: "mux4", MODE_WIDEBAND: "wideband"}
+
+#: Sentinel the device uses when there is no tone to measure THD+N against.
+THDN_INVALID = -(2 ** 31)
 
 FLAG_CAL_APPLIED = 0x01
 FLAG_OVERRANGE = 0x02
@@ -98,7 +120,7 @@ def decode_packet(buf: bytes) -> Optional[Packet]:
     """Validate and decode one frame.  Returns None if it is not a valid frame."""
     if len(buf) < PACKET_BYTES:
         return None
-    if buf[0] != SYNC0 or buf[1] != SYNC1 or buf[2] != PROTO_VERSION:
+    if buf[0] != SYNC0 or buf[1] != SYNC1_SAMPLE or buf[2] != PROTO_VERSION:
         return None
     if int.from_bytes(buf[22:24], "little") != crc16_ccitt(buf[:22]):
         return None
@@ -109,6 +131,144 @@ def decode_packet(buf: bytes) -> Optional[Packet]:
         for c in range(NUM_CHANNELS)
     )
     return Packet(seq=seq, t_us=t_us, flags=flags, codes=codes)
+
+
+@dataclass(frozen=True)
+class MetricsRecord:
+    """Live on-device metrics, emitted every 100 ms."""
+
+    seq: int
+    t_us: int
+    mode: int
+    rms: tuple                 #: per channel, in ADC codes
+    thdn_db: tuple             #: per channel, None where the device said invalid
+    fundamental_hz: tuple      #: per channel, None where no tone was found
+    psd_serial: int
+
+    @property
+    def mode_name(self) -> str:
+        return MODE_NAMES.get(self.mode, f"mode{self.mode}")
+
+
+@dataclass(frozen=True)
+class PsdRecord:
+    """One averaged power spectrum for one channel, emitted every ~478 ms."""
+
+    seq: int
+    t_us: int
+    channel: int
+    fs_hz: float
+    bins_dbfs: "np.ndarray"    #: dBFS/Hz, DC..Nyquist inclusive
+
+    @property
+    def freqs_hz(self):
+        import numpy as np
+        return np.arange(len(self.bins_dbfs)) * (self.fs_hz / (2 * (len(self.bins_dbfs) - 1)))
+
+
+def decode_metrics(buf: bytes) -> Optional[MetricsRecord]:
+    if len(buf) < METRICS_BYTES:
+        return None
+    if buf[0] != SYNC0 or buf[1] != SYNC1_METRICS or buf[2] != PROTO_VERSION:
+        return None
+    if int.from_bytes(buf[62:64], "little") != crc16_ccitt(buf[:62]):
+        return None
+
+    def i32(off):
+        return int.from_bytes(buf[off:off + 4], "little", signed=True)
+
+    def u32(off):
+        return int.from_bytes(buf[off:off + 4], "little")
+
+    thdn = tuple(
+        None if i32(26 + 4 * c) == THDN_INVALID else i32(26 + 4 * c) / 1000.0
+        for c in range(NUM_CHANNELS)
+    )
+    fund = tuple(
+        None if u32(42 + 4 * c) == 0 else u32(42 + 4 * c) / 1000.0
+        for c in range(NUM_CHANNELS)
+    )
+    return MetricsRecord(
+        seq=int.from_bytes(buf[4:6], "little"),
+        t_us=u32(6),
+        mode=buf[3],
+        rms=tuple(i32(10 + 4 * c) for c in range(NUM_CHANNELS)),
+        thdn_db=thdn,
+        fundamental_hz=fund,
+        psd_serial=u32(58),
+    )
+
+
+def decode_psd(buf: bytes) -> Optional[PsdRecord]:
+    import numpy as np
+
+    if len(buf) < PSD_BYTES:
+        return None
+    if buf[0] != SYNC0 or buf[1] != SYNC1_PSD or buf[2] != PROTO_VERSION:
+        return None
+    if int.from_bytes(buf[10:12], "little") != PSD_BINS:
+        return None
+    crc_off = 16 + PSD_BINS * 2
+    if int.from_bytes(buf[crc_off:crc_off + 2], "little") != crc16_ccitt(buf[:crc_off]):
+        return None
+
+    bins = np.frombuffer(buf[16:16 + PSD_BINS * 2], dtype="<i2").astype(np.float64) / 100.0
+    return PsdRecord(
+        seq=int.from_bytes(buf[4:6], "little"),
+        t_us=int.from_bytes(buf[6:10], "little"),
+        channel=buf[3],
+        fs_hz=int.from_bytes(buf[12:16], "little") / 1000.0,
+        bins_dbfs=bins,
+    )
+
+
+def encode_metrics(rec: MetricsRecord) -> bytes:
+    """Build a metrics record. Used by the simulator and the round-trip tests."""
+    buf = bytearray(METRICS_BYTES)
+    buf[0:3] = bytes([SYNC0, SYNC1_METRICS, PROTO_VERSION])
+    buf[3] = rec.mode & 0xFF
+    buf[4:6] = (rec.seq & 0xFFFF).to_bytes(2, "little")
+    buf[6:10] = (rec.t_us & 0xFFFFFFFF).to_bytes(4, "little")
+
+    for c in range(NUM_CHANNELS):
+        buf[10 + 4 * c: 14 + 4 * c] = int(rec.rms[c]).to_bytes(4, "little", signed=True)
+        thdn = rec.thdn_db[c]
+        raw = THDN_INVALID if thdn is None else int(round(thdn * 1000))
+        buf[26 + 4 * c: 30 + 4 * c] = raw.to_bytes(4, "little", signed=True)
+        fund = rec.fundamental_hz[c]
+        buf[42 + 4 * c: 46 + 4 * c] = int(0 if fund is None else round(fund * 1000)) \
+            .to_bytes(4, "little")
+
+    buf[58:62] = int(rec.psd_serial).to_bytes(4, "little")
+    buf[62:64] = crc16_ccitt(bytes(buf[:62])).to_bytes(2, "little")
+    return bytes(buf)
+
+
+def encode_psd(rec: PsdRecord) -> bytes:
+    """Build a PSD record."""
+    import numpy as np
+
+    buf = bytearray(PSD_BYTES)
+    buf[0:3] = bytes([SYNC0, SYNC1_PSD, PROTO_VERSION])
+    buf[3] = rec.channel & 0xFF
+    buf[4:6] = (rec.seq & 0xFFFF).to_bytes(2, "little")
+    buf[6:10] = (rec.t_us & 0xFFFFFFFF).to_bytes(4, "little")
+    buf[10:12] = PSD_BINS.to_bytes(2, "little")
+    buf[12:16] = int(round(rec.fs_hz * 1000)).to_bytes(4, "little")
+
+    scaled = np.clip(np.round(np.asarray(rec.bins_dbfs) * 100.0), -32768, 32767)
+    buf[16:16 + PSD_BINS * 2] = scaled.astype("<i2").tobytes()
+
+    crc_off = 16 + PSD_BINS * 2
+    buf[crc_off:crc_off + 2] = crc16_ccitt(bytes(buf[:crc_off])).to_bytes(2, "little")
+    return bytes(buf)
+
+
+_DECODERS = {
+    SYNC1_SAMPLE: decode_packet,
+    SYNC1_METRICS: decode_metrics,
+    SYNC1_PSD: decode_psd,
+}
 
 
 class StreamDecoder:
@@ -139,6 +299,8 @@ class StreamDecoder:
         self.bad_crc = 0
         self.decoded = 0
         self.discarded_bytes = 0
+        self.metrics_records = 0
+        self.psd_records = 0
 
     def feed(self, chunk: bytes) -> Iterator[Packet]:
         """Consume a chunk, yielding every complete packet it completes."""
@@ -152,22 +314,36 @@ class StreamDecoder:
             self._synced = False
 
         while len(self._buf) >= PACKET_BYTES:
-            pkt = decode_packet(bytes(self._buf[:PACKET_BYTES]))
-            if pkt is not None:
-                if not self._synced:
-                    self._synced = True
-                del self._buf[:PACKET_BYTES]
-                self._note_sequence(pkt)
-                self.decoded += 1
-                yield pkt
-                continue
+            kind = self._buf[1] if self._buf[0] == SYNC0 else None
+            length = RECORD_LENGTHS.get(kind) if kind is not None else None
 
-            # Not a frame at offset 0.  Distinguish "wrong place in the stream"
-            # from "right place, corrupted frame": the latter is a link fault
-            # worth counting separately.
-            head = self._buf[:PACKET_BYTES]
-            if head[0] == SYNC0 and head[1] == SYNC1 and head[2] == PROTO_VERSION:
-                self.bad_crc += 1
+            if length is not None:
+                if len(self._buf) < length:
+                    # A known record type, but not all of it has arrived. Wait
+                    # rather than resyncing - a 1044-byte PSD block spans many
+                    # serial reads and treating a partial one as corruption
+                    # would throw away a valid record every time.
+                    break
+
+                rec = _DECODERS[kind](bytes(self._buf[:length]))
+                if rec is not None:
+                    self._synced = True
+                    del self._buf[:length]
+                    self.decoded += 1
+                    if isinstance(rec, Packet):
+                        self._note_sequence(rec)
+                    elif isinstance(rec, MetricsRecord):
+                        self.metrics_records += 1
+                    else:
+                        self.psd_records += 1
+                    yield rec
+                    continue
+
+                # Right place by sync and type, wrong CRC: a link fault, not a
+                # framing loss. Counted separately because the two have
+                # completely different causes.
+                if self._buf[2] == PROTO_VERSION:
+                    self.bad_crc += 1
 
             if self._synced:
                 self.resyncs += 1
@@ -175,8 +351,9 @@ class StreamDecoder:
 
             # Advance to the next plausible sync position rather than one byte
             # at a time: on a 1 MB backlog of garbage that is the difference
-            # between a millisecond and a second.
-            nxt = self._buf.find(bytes([SYNC0, SYNC1]), 1)
+            # between a millisecond and a second. Any record type counts as a
+            # candidate, so the scan is for the shared first sync byte.
+            nxt = self._buf.find(bytes([SYNC0]), 1)
             if nxt < 0:
                 self.discarded_bytes += len(self._buf) - 1
                 del self._buf[:-1]

@@ -14,6 +14,7 @@ ads1256 capture --port /dev/ttyACM0 --seconds 300 --out run.npz --raw run.bin
 ads1256 verify  run.npz
 ads1256 noise   run.npz --channel 0 --plot noise.png
 ads1256 monitor --port /dev/ttyACM0
+ads1256 dsp --plot dsp.png
 ads1256 selftest
 ```
 
@@ -30,6 +31,7 @@ branch. It is also what lets CI cover the decoder end to end.
 | `protocol.py` | frame encode/decode and `StreamDecoder`, the resumable framer |
 | `stream.py` | byte sources — serial port, raw file replay, simulator |
 | `analysis.py` | RMS, effective/noise-free bits, Welch PSD, timestamp continuity |
+| `dsp.py` | reference polyphase decimator, Welch, THD+N - checked against the firmware |
 | `cli.py` | the `ads1256` entry point |
 
 `protocol.py` is a deliberate re-implementation of
@@ -58,8 +60,22 @@ Captures should be saved with `--raw` as well as `--out`. If the decoder later
 turns out to be wrong, a raw byte capture can be re-analysed; decoded samples
 have already had the mistake baked in.
 
+## The DSP reference
+
+`dsp.py` reimplements, in Python, everything `firmware/lib/` computes on the
+device: the polyphase decimator (bit-exact, including the Q15 rounding), Welch's
+method with the periodic Hann window and the `sum(w**2)` normaliser, and THD+N.
+
+It exists to be checked against, not to replace the firmware.
+`tools/design_filter.py` emits the taps, the C header, this package's
+`fir_coeffs.json` and a golden input/output vector; `tests/test_fir_decimate.c`
+and `tests/test_dsp.py` assert the same expected output. Two independent
+implementations agreeing bit for bit is what makes the DSP claims checkable.
+
+`ads1256 dsp` prints the comparison and `--plot` draws it.
+
 ## Tests
 
 ```bash
-python -m pytest -q      # 24 tests
+python -m pytest -q      # 43 tests
 ```

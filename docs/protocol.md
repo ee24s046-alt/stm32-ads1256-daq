@@ -28,6 +28,27 @@ So:
 
 Command responses go out on the debug UART. One direction, one format, no ambiguity.
 
+## Record types
+
+The device emits three kinds of record. All share the `0xA5` first sync byte;
+the second byte identifies the type **and fixes the length**.
+
+| Sync | Type | Bytes | Rate |
+|---|---|---:|---|
+| `A5 5A` | sample scan | 24 | 1875/s muxed, 7500/s wideband |
+| `A5 5B` | live metrics | 64 | 10/s |
+| `A5 5C` | averaged PSD block | 1044 | ~2/s, one channel round-robin |
+
+The length is implied by the type rather than carried in a field. That is
+deliberate: a corrupted stream cannot lie about a length, and a receiver that has
+never heard of a record type still knows exactly how many bytes to skip.
+
+A record always completes before the next one starts. A PSD block is 1044 bytes
+and does not fit in the 384-byte endpoint FIFO, so the uplink sends it as three
+writes — but it never interleaves sample packets into the middle of one, because
+the host's framer would then be looking at a sample packet embedded inside a PSD
+block and would reject both on CRC.
+
 ## Packet layout
 
 24 bytes, little-endian throughout, 4-byte aligned.
@@ -135,6 +156,50 @@ something is wrong:
 
 `ads1256 verify capture.npz` checks all three and fails if any disagrees.
 
+## Metrics record (`A5 5B`, 64 bytes)
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 2 | sync `0xA5 0x5B` |
+| 2 | 1 | ver |
+| 3 | 1 | acquisition mode (0 = mux4, 1 = wideband) |
+| 4 | 2 | seq |
+| 6 | 4 | t_us |
+| 10 | 16 | `rms[4]`, int32, ADC codes, 100 ms window |
+| 26 | 16 | `thdn_mdb[4]`, int32 milli-dB, `INT32_MIN` = no tone |
+| 42 | 16 | `fund_mhz[4]`, uint32 milli-Hz, 0 = no tone |
+| 58 | 4 | `psd_serial`, increments per completed PSD block |
+| 62 | 2 | crc16 |
+
+`INT32_MIN` is a real value, not a placeholder for laziness: on a shorted input
+the largest spectral bin is just the luckiest noise bin, and a THD+N computed
+from it would be a confident-looking number that means nothing. The device
+declines rather than inventing one.
+
+## PSD record (`A5 5C`, 1044 bytes)
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 2 | sync `0xA5 0x5C` |
+| 2 | 1 | ver |
+| 3 | 1 | channel |
+| 4 | 2 | seq |
+| 6 | 4 | t_us |
+| 10 | 2 | nbins = 513 |
+| 12 | 4 | fs of the analysed stream, milli-Hz |
+| 16 | 1026 | `bins[513]`, int16, dBFS/Hz × 100 |
+| 1042 | 2 | crc16 |
+
+513 bins is a 1024-point FFT, DC to Nyquist inclusive. dBFS/Hz × 100 in an
+int16 covers ±327 dB at 0.01 dB resolution — ample for a floor around
+−150 dBFS/Hz, and half the size of sending floats.
+
+`fs` travels with the block because it differs by mode (1875 Hz muxed, 7500 Hz
+wideband). A spectrum labelled with the wrong sample rate has the wrong
+frequency axis, and nothing downstream can detect it.
+
+See [dsp.md](dsp.md) for how these are computed.
+
 ## Host → device commands
 
 ASCII, newline-terminated, on the bulk OUT endpoint. Responses on the UART.
@@ -147,6 +212,8 @@ ASCII, newline-terminated, on the bulk OUT endpoint. Responses on the UART.
 | `cal zero` | average 4096 scans with inputs shorted, store as offsets (RAM) |
 | `cal save` | append the current calibration to the flash log |
 | `cal reset` | revert to unity gain / zero offset (RAM only) |
+| `mode mux` | 4-channel multiplexed, 1875 scans/s |
+| `mode wide` | single channel, 30 kSPS, M=4 decimation to 7.5 kSPS |
 | `help` | list commands |
 
 ## Reference encoder

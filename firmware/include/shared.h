@@ -41,11 +41,14 @@
 #include "daq_types.h"
 #include "spsc_ring.h"
 #include "calibration.h"
+#include "fir_decimate.h"
+#include "metrics.h"
 
 /* ---- Task priorities ---------------------------------------------------- */
 #define PRIO_SAMPLER    4U
 #define PRIO_PROCESSOR  3U
 #define PRIO_UPLINK     2U
+#define PRIO_METRICS    1U
 #define PRIO_HOUSEKEEP  1U
 
 /* ---- Stack depths, in words.  Sized from measured high-water marks with
@@ -53,20 +56,42 @@
  * feel.
  * ---------------------------------------------------------------------- */
 #define STACK_SAMPLER    256U
-#define STACK_PROCESSOR  256U
+#define STACK_PROCESSOR  384U
 #define STACK_UPLINK     384U
+#define STACK_METRICS    512U
 #define STACK_HOUSEKEEP  512U
 
-/* ---- Ring depths -------------------------------------------------------- */
-#define RING_RAW_SLOTS   256U   /* 137 ms of buffering at 1875 scans/s */
+/* ---- Ring depths --------------------------------------------------------
+ * RING_RAW is sized by the harder of the two modes. At 1875 scans/s it holds
+ * 137 ms; in wideband mode the sampler runs at 30 kSPS, so the same 256 slots
+ * are only 8.5 ms - still 8x the processor's 1 ms polling period.
+ * ---------------------------------------------------------------------- */
+#define RING_RAW_SLOTS   256U
 #define RING_TX_SLOTS    256U
+#define RING_DSP_SLOTS   256U   /* processor -> metrics            */
+#define RING_META_SLOTS    8U   /* metrics   -> uplink, 1044 B each */
 
 extern spsc_ring_t g_ring_raw;   /**< sampler   -> processor */
 extern spsc_ring_t g_ring_tx;    /**< processor -> uplink    */
+extern spsc_ring_t g_ring_dsp;   /**< processor -> metrics   */
+extern spsc_ring_t g_ring_meta;  /**< metrics   -> uplink    */
 
 extern TaskHandle_t g_task_sampler;
 extern TaskHandle_t g_task_processor;
 extern TaskHandle_t g_task_uplink;
+extern TaskHandle_t g_task_metrics;
+
+/**
+ * Acquisition mode. Written only by the housekeeping task in response to a
+ * host command, read by the sampler and processor. A plain volatile is
+ * sufficient: it is a single aligned word, and a mode change taking effect one
+ * sample early or late is harmless - the packets carry the mode in their flags,
+ * so the host is never confused about which regime a sample belongs to.
+ */
+extern volatile daq_mode_t g_mode;
+
+/** Live on-device metrics. Owned by the metrics task. */
+extern metrics_t g_metrics;
 
 /** Live calibration, loaded from flash at boot or identity if none exists. */
 extern daq_cal_t g_calibration;
@@ -86,6 +111,12 @@ typedef struct {
     volatile uint32_t isr_latency_max_cyc;
     volatile uint32_t sampler_service_max_cyc;
     volatile uint32_t processor_service_max_cyc;
+    volatile uint32_t decim_out;          /**< samples emitted by the decimator */
+    volatile uint32_t decim_service_max_cyc;
+    volatile uint32_t psd_blocks;         /**< completed Welch averages         */
+    volatile uint32_t psd_service_max_cyc;/**< worst-case 1024-point FFT + PSD  */
+    volatile uint32_t meta_sent;
+    volatile uint32_t meta_dropped;
 } daq_stats_t;
 
 extern daq_stats_t g_stats;
@@ -95,5 +126,6 @@ void daq_shared_init(void);
 void task_sampler(void *arg);
 void task_processor(void *arg);
 void task_uplink(void *arg);
+void task_metrics(void *arg);
 
 #endif /* DAQ_SHARED_H */

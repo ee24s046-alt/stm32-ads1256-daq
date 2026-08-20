@@ -42,9 +42,21 @@ add_library(daq_core STATIC
     firmware/lib/packet.c
     firmware/lib/crc.c
     firmware/lib/calibration.c
+    firmware/lib/fir_decimate.c
+    firmware/lib/fft.c
+    firmware/lib/metrics.c
 )
 target_include_directories(daq_core PUBLIC firmware/include)
 target_compile_options(daq_core PRIVATE ${DAQ_WARNINGS})
+
+# libm for the DSP: sqrtf/log10f/cosf. On the ARM side newlib-nano supplies it
+# and the linker already pulls it in; on the host it must be named explicitly.
+if(NOT CMAKE_CROSSCOMPILING)
+    find_library(LIBM m)
+    if(LIBM)
+        target_link_libraries(daq_core PUBLIC ${LIBM})
+    endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # Mode 2: native unit tests
@@ -121,6 +133,7 @@ add_executable(daq.elf
     firmware/rtos/task_sampler.c
     firmware/rtos/task_processor.c
     firmware/rtos/task_uplink.c
+    firmware/rtos/task_metrics.c
     firmware/rtos/shared.c
 )
 target_include_directories(daq.elf PRIVATE
@@ -137,7 +150,7 @@ target_link_options(daq.elf PRIVATE
     -Wl,--gc-sections
     -Wl,-Map=${CMAKE_BINARY_DIR}/daq.map,--cref
     -Wl,--print-memory-usage)
-target_link_libraries(daq.elf PRIVATE freertos daq_core)
+target_link_libraries(daq.elf PRIVATE freertos daq_core m)
 target_compile_definitions(daq.elf PRIVATE STM32F407xx)
 target_compile_options(daq_core PRIVATE ${MCU_FLAGS})
 

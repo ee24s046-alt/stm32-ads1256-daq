@@ -6,6 +6,10 @@ exactly how to capture each one, and where it goes.
 
 **Status key:** `[x]` captured and committed · `[ ]` not yet captured.
 
+Item 9 is already done: the DSP demonstration is a property of the filter design
+and the arithmetic, so it needs no hardware and is committed. Everything else
+needs the bench.
+
 | # | Backs the claim | Artifact | Status |
 |---|---|---|---|
 | 1 | deadline misses, CPU idle, stack high-water, ring watermarks | `docs/evidence/stats-300s.txt` | `[ ]` |
@@ -16,6 +20,8 @@ exactly how to capture each one, and where it goes.
 | 6 | the instrument physically exists | `docs/img/bench.jpg` | `[ ]` |
 | 7 | the fault handler actually diagnoses | `docs/evidence/fault-example.txt` | `[ ]` |
 | 8 | calibration survives power cycles | `docs/evidence/cal-persistence.txt` | `[ ]` |
+| 9 | the DSP chain, verified without hardware | `docs/img/dsp-demo.png` | **`[x]`** |
+| 10 | wideband mode holds its 33.3 µs deadline | `docs/img/la-wideband-window.png` | `[ ]` |
 
 Until an item is `[x]`, the corresponding numbers in
 [measured-results.md](measured-results.md) are predictions, not measurements,
@@ -162,6 +168,33 @@ boot falling back to the previous record. That is the behaviour the whole
 log design exists for, and almost nobody demonstrates it.
 
 ---
+
+## 9. DSP demonstration
+
+The only artifact here that needs no hardware at all - it is a property of the
+filter design and the arithmetic:
+
+```bash
+ads1256 dsp --plot docs/img/dsp-demo.png
+```
+
+Three panels: the filter response with the aliasing bands shaded and the
+-40 dB requirement marked; a 6 kHz tone decimated with and without the
+anti-alias filter; and a single periodogram against the 6-average Welch estimate
+on the same data at the same resolution. Also capture the console output to
+`docs/evidence/dsp.txt` - the numbers are the substance and the plot is the
+illustration.
+
+## 10. Wideband-mode timing
+
+Same logic-analyser setup as captures 2 and 3, but with the device in
+`mode wide`. This is the harder case and therefore the more interesting capture:
+the `/DRDY` period is 33.3 us rather than 133 us and the sampler uses 80 % of it.
+
+Put cursors on `/DRDY` falling to `/CS` rising and show that the 3-byte RDATAC
+read completes before the next edge. If you capture only one timing screenshot,
+capture this one - the muxed mode has 2x margin and nobody doubts it; the
+wideband mode is where the design is actually being claimed to work.
 
 ## Helper
 

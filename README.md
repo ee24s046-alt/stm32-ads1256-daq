@@ -6,8 +6,8 @@ ADC, streaming live to a PC over USB with characterised noise performance.
 STM32F407 (Cortex-M4) · TI ADS1256 · FreeRTOS · **no vendor HAL, no CMSIS pack,
 no dynamic allocation** · register-level throughout.
 
-[![firmware](https://img.shields.io/badge/firmware-23.1%20KB%20flash%20%2F%2011.0%20KB%20RAM-blue)]()
-[![tests](https://img.shields.io/badge/tests-3%20CTest%20%2B%2024%20pytest-brightgreen)]()
+[![firmware](https://img.shields.io/badge/firmware-40.3%20KB%20flash%20%2F%2041.3%20KB%20RAM-blue)]()
+[![tests](https://img.shields.io/badge/tests-6%20CTest%20%2B%2043%20pytest-brightgreen)]()
 [![license](https://img.shields.io/badge/license-MIT-lightgrey)]()
 
 ---
@@ -23,6 +23,8 @@ about.
 |---|---|
 | **Hardware** | STM32F407VGT6 @ 168 MHz · TI ADS1256 24-bit Σ-Δ · 4 differential channels |
 | **Conversion rate** | 30 kSPS DRATE → 7500 settled conversions/s → **1875 four-channel scans/s** |
+| **Wideband mode** | multiplexer parked → no settling penalty → **30 kSPS single channel**, decimated on-device to 7.5 kSPS |
+| **On-device DSP** | M=4 polyphase anti-alias decimator · 1024-pt Welch PSD · live RMS / THD+N, streamed alongside the samples |
 | **Real-time deadline** | 133 µs per `/DRDY`, **zero misses over 300 s** (2.25 M interrupts) |
 | **Architecture** | 3-task FreeRTOS pipeline, sampler (4) → processor (3) → uplink (2), two lock-free SPSC rings |
 | **Interface** | USB CDC virtual COM port, custom 24-byte binary framing with CRC-16 and resync |
@@ -43,7 +45,10 @@ Full detail, with reproduction commands, in
 | Effective resolution | 20.13 bits RMS-referred, **17.40 noise-free bits** (6.6 σ) |
 | Dropped USB packets over 300 s | **0** of 562 500, verified from the wire by sequence *and* timestamp continuity |
 | Stack high-water, worst task | 51.0 % of allocated |
-| Flash / RAM | 23.1 KB / 11.0 KB + 12.0 KB CCM |
+| Alias rejection, measured | **55.6 dB** into DC–3 kHz, against a >40 dB requirement — with a no-filter control at 0.0 dB |
+| Polyphase vs filter-then-discard | **4× fewer MACs**, bit-identical output (asserted, not assumed) |
+| PSD variance, 6 averages | **5.37 dB → 2.00 dB** scatter; a 16× longer FFT gives 5.56 dB, i.e. no improvement |
+| Flash / RAM | 40.3 KB / 41.3 KB + 26.8 KB CCM |
 
 ## Evidence
 
@@ -80,6 +85,9 @@ openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
 # host tooling
 pip install -e host[dev]
 ads1256 monitor --port /dev/ttyACM0
+
+# verify and demonstrate the on-device DSP chain (no hardware needed)
+ads1256 dsp --plot dsp.png
 
 # a 5-minute acceptance run
 ads1256 capture --port /dev/ttyACM0 --seconds 300 --out run.npz --raw run.bin
@@ -138,13 +146,19 @@ lives.
 | Why the fault handler prints MMFAR/BFAR only when their VALID bits are set | [`fault_handler.c`](firmware/core/fault_handler.c) |
 | Why the USB IN endpoint carries binary only, never text | [`main.c`](firmware/core/main.c) |
 | Why calibration is Q16.16 fixed point rather than `float` | [calibration.md](docs/calibration.md#why-fixed-point-rather-than-float) |
+| Why the anti-alias stopband is at 4.5 kHz and not the output Nyquist — 68 taps instead of 660 | [dsp.md](docs/dsp.md#where-the-stopband-edge-comes-from) |
+| Why a longer FFT does *not* reduce PSD variance, and averaging does | [dsp.md](docs/dsp.md#averaging-is-what-reduces-variance-fft-length-does-not) |
+| Why the FIR is fixed point and the FFT is float — opposite choices, opposite reasons | [dsp.md](docs/dsp.md#float-fft-fixed-point-filter) |
+| Why THD+N has a −65 dB floor, and why ±2 bins would make it −33 dB | [dsp.md](docs/dsp.md#thdn-and-its-floor) |
+| Why the decimator is load-bearing rather than decorative | [`task_processor.c`](firmware/rtos/task_processor.c) |
 
 ## Repository layout
 
 ```
 firmware/
   include/        public headers - the design rationale lives in these
-  lib/            portable core: SPSC ring, packet codec, CRC, calibration
+  lib/            portable core: SPSC ring, packet codec, CRC, calibration,
+                  polyphase FIR, FFT, Welch/THD+N metrics
                   (compiled into BOTH the image and the native unit tests)
   core/           startup path, clocks, faults, RTOS hooks, main
   drivers/        register-level SPI, GPIO, UART, flash, ADS1256
@@ -157,7 +171,9 @@ tests/            native unit tests over firmware/lib, ASan + UBSan
 host/             Python package: decoder, capture, noise analysis, CLI, pytest
 hardware/         interconnect diagram, schematic and design notes
 captures/         reference capture, committed so the numbers are reproducible
-tools/            collect-evidence.sh - regenerates the host-side artifacts
+tools/            design_filter.py - generates the FIR coefficients for BOTH
+                  languages plus the golden vector both test against
+                  collect-evidence.sh - regenerates the host-side artifacts
 docs/             architecture, protocol, timing, calibration, results, bring-up
   img/            logic-analyser captures, noise plot, bench photograph
   evidence/       raw terminal output behind every measured claim
@@ -168,6 +184,7 @@ cmake/            arm-none-eabi toolchain file
 
 - **[architecture.md](docs/architecture.md)** — the pipeline, and why it is three tasks
 - **[timing-budget.md](docs/timing-budget.md)** — every deadline, derived then measured
+- **[dsp.md](docs/dsp.md)** — multirate processing, spectral estimation, and how both are verified
 - **[protocol.md](docs/protocol.md)** — wire format, framing, loss detection
 - **[calibration.md](docs/calibration.md)** — correction model and the flash log
 - **[measured-results.md](docs/measured-results.md)** — bench numbers and how to reproduce them

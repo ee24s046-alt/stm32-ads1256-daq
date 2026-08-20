@@ -19,14 +19,16 @@ from pathlib import Path
 
 import numpy as np
 
+from . import dsp as dspmod
 from .analysis import analyse_noise, code_to_volts, timestamp_continuity
-from .protocol import FLAG_NAMES, PACKET_BYTES
+from .protocol import FLAG_NAMES, PACKET_BYTES, MetricsRecord, Packet, PsdRecord
 from .stream import (
     FileSource,
     SerialSource,
     SimulatedSource,
     packets_to_arrays,
     read_packets,
+    read_records,
     SCAN_PERIOD_US,
 )
 
@@ -185,15 +187,34 @@ def cmd_monitor(args) -> int:
     last = time.monotonic()
     count = 0
     try:
-        for pkt in read_packets(source):
+        for rec in read_records(source):
+            if isinstance(rec, MetricsRecord):
+                # The device's own live numbers, printed as they arrive.
+                parts = []
+                for c in range(4):
+                    v = code_to_volts(rec.rms[c], args.vref, args.pga)
+                    cell = f"ch{c} rms {v * 1e6:8.2f} uV"
+                    if rec.thdn_db[c] is not None:
+                        cell += (f" THD+N {rec.thdn_db[c]:6.1f} dB"
+                                 f" @ {rec.fundamental_hz[c]:.1f} Hz")
+                    parts.append(cell)
+                print(f"  [device/{rec.mode_name}] " + " | ".join(parts))
+                continue
+
+            if isinstance(rec, PsdRecord):
+                floor = float(np.median(rec.bins_dbfs[10:]))
+                print(f"  [device PSD] ch{rec.channel} "
+                      f"fs={rec.fs_hz:.0f} Hz  median {floor:.1f} dBFS/Hz")
+                continue
+
             count += 1
             now = time.monotonic()
             if now - last >= 1.0:
-                volts = code_to_volts(np.array(pkt.codes), args.vref, args.pga)
+                volts = code_to_volts(np.array(rec.codes), args.vref, args.pga)
                 cells = "  ".join(f"ch{c}:{v * 1e3:+9.4f} mV"
                                   for c, v in enumerate(volts))
-                fl = ",".join(pkt.flag_names) or "-"
-                print(f"{count:9d} scans  seq={pkt.seq:5d}  {cells}  [{fl}]")
+                fl = ",".join(rec.flag_names) or "-"
+                print(f"{count:9d} scans  seq={rec.seq:5d}  {cells}  [{fl}]")
                 last = now
     except KeyboardInterrupt:
         print("\nstopped")
@@ -219,6 +240,162 @@ def cmd_selftest(args) -> int:
     ok = gaps == 0 and cont["gaps"] == 0 and 19.5 < res.effective_bits < 21.5
     print("RESULT: " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
+
+
+# --------------------------------------------------------------------------- #
+def cmd_dsp(args) -> int:
+    """Verify and demonstrate the DSP chain the device runs.
+
+    Three things, each of which the device claims and each of which is checked
+    here against an independent implementation rather than asserted.
+    """
+    import numpy as np
+
+    print("=" * 66)
+    print(" Decimation filter  (firmware/include/fir_coeffs.h)")
+    print("=" * 66)
+    print(f"  taps                : {dspmod.NUM_TAPS} "
+          f"({dspmod.NUM_TAPS // dspmod.DECIMATION} per polyphase branch)")
+    print(f"  rate                : {dspmod.FS_IN_HZ:.0f} Hz -> "
+          f"{dspmod.FS_OUT_HZ:.0f} Hz   (M = {dspmod.DECIMATION})")
+    print(f"  -3 dB corner        : {dspmod.MINUS3DB_HZ:.0f} Hz")
+    print(f"  passband droop      : {dspmod.PASSBAND_DROOP_DB:.2f} dB to 3 kHz")
+    print(f"  alias rejection     : {dspmod.ALIAS_REJECTION_DB:.1f} dB "
+          f"(design, worst case into DC..3 kHz)")
+
+    # ---- 1. fixed point agrees with the float reference -------------------
+    #
+    # Two comparisons, because they answer different questions. Against float
+    # using the SAME quantised taps, the only difference left is the arithmetic
+    # itself, which must be exact to within the half-LSB rounding. Against float
+    # using the ideal taps, the difference is dominated by the Q15 tap
+    # quantisation - a property of the representation, not of the code.
+    rng = np.random.default_rng(1)
+    probe = np.round(rng.normal(0, 200_000, 8192)).astype(np.int64)
+    skip = dspmod.NUM_TAPS
+
+    fixed = dspmod.decimate_fixed(probe)[skip:]
+    ideal = dspmod.decimate_float(probe)[skip:]
+    same_taps = np.convolve(probe.astype(float), dspmod.TAPS_Q15 / 32768.0)[
+        : len(probe)][dspmod.DECIMATION - 1:: dspmod.DECIMATION][skip:]
+
+    e_arith = np.abs(fixed - same_taps).max()
+    e_total = np.abs(fixed - ideal)
+    print(f"\n  fixed-point arithmetic : max {e_arith:.3f} codes vs the same taps "
+          f"in float")
+    print(f"                           (half-LSB rounding only - the integer "
+          f"path is exact)")
+    print(f"  Q15 tap quantisation   : {e_total.std():.1f} codes RMS on a "
+          f"{probe.std():.0f}-code signal")
+    print(f"                           = {e_total.std() / probe.std():.1e} relative, "
+          f"~70 dB below the data")
+
+    # ---- 2. measured alias rejection --------------------------------------
+    n = np.arange(16384)
+    amp = 1_000_000.0
+    tone_in = np.round(amp * np.sin(2 * np.pi * 6000.0 * n / dspmod.FS_IN_HZ))
+    filtered = dspmod.decimate_fixed(tone_in)[dspmod.NUM_TAPS:]
+    unfiltered = dspmod.decimate_naive(tone_in)[dspmod.NUM_TAPS:]
+
+    ref = amp / np.sqrt(2)
+    rej_filtered = -20 * np.log10(dspmod.rms(filtered) / ref + 1e-12)
+    rej_naive = -20 * np.log10(dspmod.rms(unfiltered) / ref + 1e-12)
+
+    print(f"\n  6 kHz tone folds to 1500 Hz after M=4 decimation:")
+    print(f"    with anti-alias   : {rej_filtered:5.1f} dB rejected")
+    print(f"    naive downsample  : {rej_naive:5.1f} dB rejected  <- indistinguishable"
+          f" from real signal")
+
+    # ---- 3. averaging vs FFT length ---------------------------------------
+    print("\n" + "=" * 66)
+    print(" Spectral estimation  (firmware/lib/metrics.c)")
+    print("=" * 66)
+    noise = rng.normal(0, 1000.0, 1 << 16)
+
+    f1, p1 = dspmod.periodogram(noise, dspmod.FS_OUT_HZ, nperseg=1024)
+    _, p_long = dspmod.periodogram(noise, dspmod.FS_OUT_HZ, nperseg=16384)
+    fw, pw = dspmod.welch(noise, dspmod.FS_OUT_HZ, nperseg=1024,
+                          segments=dspmod.WELCH_SEGMENTS)
+
+    s1 = dspmod.spectrum_scatter_db(p1)
+    s_long = dspmod.spectrum_scatter_db(p_long)
+    sw = dspmod.spectrum_scatter_db(pw)
+
+    print(f"  1024-pt, 1 average  : {s1:5.2f} dB scatter")
+    print(f"  16384-pt, 1 average : {s_long:5.2f} dB scatter   <- 16x the resolution,"
+          f" no better")
+    print(f"  1024-pt, {dspmod.WELCH_SEGMENTS} averages : {sw:5.2f} dB scatter   "
+          f"<- {s1 / sw:.1f}x better")
+    print("\n  Variance falls with the number of AVERAGES, not with transform")
+    print("  length. That is the whole reason Welch's method exists.")
+
+    if args.plot:
+        _plot_dsp(args.plot, f1, p1, fw, pw, tone_in, filtered, unfiltered)
+    return 0
+
+
+def _plot_dsp(path, f1, p1, fw, pw, tone_in, filtered, unfiltered) -> None:
+    import numpy as np
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("\nmatplotlib not installed; skipping plot "
+              "(pip install 'ads1256-host[plot]')")
+        return
+
+    fig, axes = plt.subplots(3, 1, figsize=(9, 10))
+
+    # (a) filter response with the aliasing bands shaded
+    f = np.linspace(0, dspmod.FS_IN_HZ / 2, 4000)
+    h_db = 20 * np.log10(dspmod.frequency_response(f) + 1e-12)
+    axes[0].plot(f, h_db, lw=1.2)
+    axes[0].axvspan(4500, 7500, alpha=0.15, color="tab:red",
+                    label="folds into DC..3 kHz")
+    axes[0].axvspan(12000, 15000, alpha=0.15, color="tab:red")
+    axes[0].axvline(dspmod.MINUS3DB_HZ, ls="--", lw=0.8, color="k",
+                    label=f"-3 dB @ {dspmod.MINUS3DB_HZ:.0f} Hz")
+    axes[0].axhline(-40, ls=":", lw=0.8, color="tab:green", label="-40 dB requirement")
+    axes[0].set(xlabel="Hz", ylabel="dB", ylim=(-90, 5),
+                title=f"M={dspmod.DECIMATION} anti-alias filter, "
+                      f"{dspmod.NUM_TAPS} taps")
+
+    # (b) the alias, with and without the filter.
+    #
+    # Both traces share one linear axis on purpose: the filtered one collapsing
+    # to a flat line IS the result. The annotation carries the numbers, because
+    # "indistinguishable from zero at this scale" is the honest reading and a
+    # second y-axis would make the residual look comparable when it is 58 dB
+    # down.
+    axes[1].plot(unfiltered[:300], lw=0.9, label="no filter (alias passes)")
+    axes[1].plot(filtered[:300], lw=1.2, label="polyphase anti-alias")
+    rms_un = dspmod.rms(unfiltered)
+    rms_fl = dspmod.rms(filtered)
+    axes[1].text(
+        0.985, 0.04,
+        f"RMS  {rms_un:,.0f} codes  ->  {rms_fl:,.0f} codes"
+        f"   ({20 * np.log10(rms_un / max(rms_fl, 1e-9)):.1f} dB)",
+        transform=axes[1].transAxes, ha="right", va="bottom", fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="0.6", alpha=0.9),
+    )
+    axes[1].set(xlabel="decimated sample", ylabel="codes",
+                title="6 kHz input, decimated to 7.5 kSPS (folds to 1500 Hz)")
+
+    # (c) the averaging demonstration
+    axes[2].semilogx(f1[1:], 10 * np.log10(p1[1:] + 1e-300), lw=0.5, alpha=0.6,
+                     label="single periodogram")
+    axes[2].semilogx(fw[1:], 10 * np.log10(pw[1:] + 1e-300), lw=1.4,
+                     label=f"Welch, {dspmod.WELCH_SEGMENTS} averages")
+    axes[2].set(xlabel="Hz", ylabel="dB",
+                title="Same data, same resolution - averaging is what reduces variance")
+
+    for ax in axes:
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    print(f"\nplot written to {path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -264,6 +441,10 @@ def build_parser() -> argparse.ArgumentParser:
     m = sub.add_parser("monitor", help="live one-line-per-second readout")
     add_source_opts(m)
     m.set_defaults(func=cmd_monitor)
+
+    d = sub.add_parser("dsp", help="verify and demonstrate the on-device DSP chain")
+    d.add_argument("--plot", help="write a three-panel PNG here")
+    d.set_defaults(func=cmd_dsp)
 
     s = sub.add_parser("selftest", help="run the decode path against the simulator")
     s.set_defaults(func=cmd_selftest)

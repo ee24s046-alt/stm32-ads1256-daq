@@ -62,4 +62,33 @@ static inline int32_t daq_sext24(uint32_t raw24)
     return (int32_t)((raw24 & 0x800000UL) != 0U ? (raw24 | 0xFF000000UL) : raw24);
 }
 
+/* -------------------------------------------------------------------------
+ * Metrics and PSD records.
+ *
+ * These share the sample record's 0xA5 first sync byte and are distinguished
+ * by the second, which also fixes the length.  A type-to-length map rather
+ * than a length field: the length is then not something a corrupted stream can
+ * lie about, and a receiver that has never heard of a record type still knows
+ * exactly how many bytes to skip.
+ * ---------------------------------------------------------------------- */
+
+/** @brief Total record length for a second sync byte, or 0 if unrecognised. */
+uint32_t daq_record_length(uint8_t sync1);
+
+void daq_metrics_encode(const daq_metrics_rec_t *rec, uint8_t *out);
+bool daq_metrics_decode(const uint8_t *in, daq_metrics_rec_t *rec);
+
+void daq_psd_encode(const daq_psd_rec_t *rec, uint8_t *out);
+bool daq_psd_decode(const uint8_t *in, daq_psd_rec_t *rec);
+
+/**
+ * @brief Find the first offset in @p buf holding any valid record.
+ *
+ * Validates sync, version, known type and CRC, exactly as the sample-only
+ * resync does.  On success reports where the record starts, its type (the
+ * second sync byte) and its length.
+ */
+bool daq_record_resync(const uint8_t *buf, size_t len, size_t *out_off,
+                       uint8_t *out_type, uint32_t *out_len);
+
 #endif /* DAQ_PACKET_H */
