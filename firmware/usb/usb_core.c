@@ -63,7 +63,9 @@ static void fifo_write(uint8_t ep, const uint8_t *src, uint16_t len)
 
 static void fifo_read(uint8_t *dst, uint16_t len)
 {
-    volatile uint32_t *fifo = USB_FIFO(0U);   /* RX FIFO is always at index 0 */
+    /* Pointer to const volatile: this function only reads the FIFO, but each
+       read returns a different word as the core pops it. */
+    const volatile uint32_t *fifo = USB_FIFO(0U);  /* RX FIFO is always index 0 */
     const uint16_t words = (uint16_t)((len + 3U) / 4U);
 
     for (uint16_t i = 0U; i < words; i++) {
@@ -335,7 +337,7 @@ void usb_device_init(void)
     delay_us(50U);
 
     USB_PCGCCTL = 0U;                            /* clocks on */
-    USB_DEVICE->DCFG = DCFG_DSPD_FS | (0UL << 4);
+    USB_DEVICE->DCFG = DCFG_DSPD_FS;    /* DAD = 0 until SET_ADDRESS */
 
     /* FIFO plan.  Sizes are in 32-bit words and the TX start addresses are
        cumulative - an overlap here is silent and shows up as random data

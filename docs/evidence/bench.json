@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Bench-measured results. Everything here needs the hardware.",
+    "",
+    "While \"measured\" is false, tools/make_evidence_pdf.py OMITS the bench",
+    "section entirely rather than printing placeholders - a reviewer who sees",
+    "a TODO in an evidence document reads the whole thing as a draft.",
+    "",
+    "After a bench run: fill in the numbers below, set measured to true, and",
+    "re-run  python3 tools/make_evidence_pdf.py",
+    "",
+    "The keys below are the figures docs/measured-results.md predicts. Replace",
+    "the values with what the hardware actually reports - if a number differs",
+    "from the prediction, the prediction was wrong, and the measured value is",
+    "the one that goes in both this file and measured-results.md."
+  ],
+  "measured": false,
+  "date": "",
+  "hardware": "STM32F4-Discovery + ADS1256 module, 7.68 MHz CLKIN, 2.5 V reference, PGA = 1",
+  "run": "300 s streaming, all four differential pairs shorted at the input connector",
+  "results": {
+    "/DRDY interrupts serviced": "",
+    "Deadline misses": "",
+    "/DRDY -> sample in ring, worst case": "",
+    "CPU idle while streaming": "",
+    "Stack high-water, worst task": "",
+    "Noise floor, shorted inputs": "",
+    "Effective resolution": "",
+    "Dropped USB packets": "",
+    "Timestamp jitter, RMS": ""
+  }
+}

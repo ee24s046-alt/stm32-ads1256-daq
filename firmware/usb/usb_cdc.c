@@ -11,11 +11,19 @@
 #define CDC_GET_LINE_CODING        0x21U
 #define CDC_SET_CONTROL_LINE_STATE 0x22U
 
+/*
+ * CDC 1.2 line-coding structure. The individual fields are never read by this
+ * firmware - the struct is a wire format, handed to the host as seven bytes by
+ * GET_LINE_CODING. Naming the fields rather than using a byte array is what
+ * makes the layout checkable against the specification, which is why the
+ * "unused member" warnings below are suppressed rather than fixed.
+ */
 typedef struct __attribute__((packed)) {
+    /* cppcheck-suppress unusedStructMember */
     uint32_t dwDTERate;
-    uint8_t  bCharFormat;
-    uint8_t  bParityType;
-    uint8_t  bDataBits;
+    uint8_t  bCharFormat;   /* cppcheck-suppress unusedStructMember */
+    uint8_t  bParityType;   /* cppcheck-suppress unusedStructMember */
+    uint8_t  bDataBits;     /* cppcheck-suppress unusedStructMember */
 } cdc_line_coding_t;
 
 /*

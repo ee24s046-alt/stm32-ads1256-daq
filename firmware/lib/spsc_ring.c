@@ -107,6 +107,11 @@ uint32_t spsc_pop_bulk(spsc_ring_t *r, void *dst, uint32_t max)
         (void)memcpy(out, &r->storage[(size_t)first_idx * r->elem_size],
                      (size_t)n1 * r->elem_size);
 
+        /* cppcheck-suppress knownConditionTrueFalse
+         * False positive: cppcheck only follows the (n < to_end) arm of the
+         * ternary above, where n1 == n. In the other arm n1 == to_end < n and
+         * this is the wrapped remainder. test_bulk_drain_across_wrap() in
+         * tests/test_spsc_ring.c exercises exactly this path. */
         if (n1 < n) {
             (void)memcpy(out + ((size_t)n1 * r->elem_size), r->storage,
                          (size_t)(n - n1) * r->elem_size);

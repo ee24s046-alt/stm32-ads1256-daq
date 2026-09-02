@@ -69,6 +69,45 @@ jobs:
       - name: Test
         run: ctest --test-dir build-host --output-on-failure
 
+  analysis:
+    name: Static analysis and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build cppcheck lcov
+
+      # Treat a new cppcheck finding as a build failure. The alternative - a
+      # report nobody reads - is worse than not running it: every genuine
+      # finding then arrives buried in known noise. Suppressions are inline and
+      # carry a comment saying why.
+      - name: cppcheck
+        run: |
+          cppcheck --enable=warning,style,performance,portability \
+                   --inline-suppr --suppress=missingIncludeSystem --std=c11 \
+                   -I firmware/include -I firmware/config \
+                   --error-exitcode=1 --quiet \
+                   firmware/lib firmware/drivers firmware/core firmware/usb firmware/rtos
+
+      - name: Coverage of the portable core
+        run: |
+          cmake -B build-cov -G Ninja -DDAQ_BUILD_HOST_TESTS=ON -DDAQ_SANITIZE=OFF \
+                -DCMAKE_C_FLAGS="--coverage -O0 -g" \
+                -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          cmake --build build-cov
+          ctest --test-dir build-cov --output-on-failure
+          lcov --capture --directory build-cov --output-file cov.info
+          lcov --extract cov.info '*/firmware/lib/*' --output-file cov-lib.info
+          lcov --list cov-lib.info
+
+      # The portable core is the part that is testable without hardware, so it
+      # is the part that has no excuse. 90 % is the floor, not the target.
+      - name: Enforce the coverage floor
+        run: |
+          RATE=$(lcov --summary cov-lib.info 2>&1 | grep -oP 'lines\.+: \K[0-9.]+')
+          echo "line coverage: ${RATE}%"
+          awk -v r="$RATE" 'BEGIN { exit (r >= 90.0) ? 0 : 1 }' \
+            || { echo "::error::coverage ${RATE}% is below the 90% floor"; exit 1; }
+
   coefficients:
     name: Generated filter coefficients are in sync
     runs-on: ubuntu-latest

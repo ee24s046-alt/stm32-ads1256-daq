@@ -30,7 +30,7 @@ volatile uint32_t g_clock_fallback_hsi = 0U;
 
 void SystemInit(void);
 
-static bool wait_flag(volatile uint32_t *reg, uint32_t mask, bool want_set)
+static bool wait_flag(const volatile uint32_t *reg, uint32_t mask, bool want_set)
 {
     for (uint32_t i = 0U; i < RCC_TIMEOUT_LOOPS; i++) {
         const bool is_set = ((*reg & mask) != 0U);

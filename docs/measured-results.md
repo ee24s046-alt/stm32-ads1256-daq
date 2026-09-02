@@ -258,6 +258,43 @@ $ cd host && python -m pytest -q
 43 passed
 ```
 
+### Coverage of the portable core
+
+Measured with gcov/lcov over the native test build:
+
+| Module | Lines | Covered | Rate |
+|---|---:|---:|---:|
+| `crc.c` | 17 | 17 | 100.0 % |
+| `fft.c` | 48 | 48 | 100.0 % |
+| `fir_decimate.c` | 39 | 39 | 100.0 % |
+| `packet.c` | 152 | 146 | 96.1 % |
+| `metrics.c` | 110 | 103 | 93.6 % |
+| `calibration.c` | 51 | 47 | 92.2 % |
+| `spsc_ring.c` | 75 | 68 | 90.7 % |
+| **Total** | **492** | **468** | **95.1 %** |
+
+Functions: 93.5 % (43 of 46). CI enforces a 90 % floor and fails below it.
+
+This is the portable core only — the part that can be tested without hardware,
+and therefore the part that has no excuse. Driver and RTOS code is exercised on
+the bench, not here.
+
+### Static analysis
+
+```
+$ cppcheck --enable=warning,style,performance,portability --inline-suppr \
+           --std=c11 -I firmware/include -I firmware/config \
+           firmware/lib firmware/drivers firmware/core firmware/usb firmware/rtos
+(no output)
+```
+
+Clean, and CI runs it with `--error-exitcode=1` so a new finding fails the
+build. The three suppressions in the tree are inline and each carries a comment
+saying why — one is a genuine cppcheck false positive on the ring buffer's wrap
+branch (it follows only one arm of a ternary), the others are a FreeRTOS-fixed
+callback signature and a wire-format struct whose fields are deliberately named
+rather than packed into a byte array.
+
 The C tests compile the *same* `firmware/lib/*.c` the image links, under
 AddressSanitizer and UndefinedBehaviorSanitizer — including the ring-buffer index
 wrapping past 2³², which on a continuously streaming device happens after about

@@ -196,6 +196,22 @@ read completes before the next edge. If you capture only one timing screenshot,
 capture this one - the muxed mode has 2x margin and nobody doubts it; the
 wideband mode is where the design is actually being claimed to work.
 
+## Packaging it for someone who will not clone the repo
+
+`tools/make_evidence_pdf.py` builds `docs/evidence/project-evidence.pdf` - three
+pages covering the system, the verification that needs no hardware, the coverage
+and static-analysis results, and the DSP plot.
+
+```bash
+python3 tools/make_evidence_pdf.py
+```
+
+It reads bench figures from `docs/evidence/bench.json`, which ships with
+`"measured": false`. While that is false the bench section is **omitted
+entirely** rather than printed with placeholders: a reviewer who finds a TODO in
+a document titled "evidence" reads the whole thing as a draft. Fill the file in
+after a bench run and re-run the script.
+
 ## Helper
 
 `tools/collect-evidence.sh` runs the host-side items (1, 4, 5) and puts the

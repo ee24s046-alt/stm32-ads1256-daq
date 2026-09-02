@@ -53,6 +53,9 @@ void vApplicationGetTimerTaskMemory(StaticTask_t **tcb, StackType_t **stack,
  * in RAM, and assuming the USB stack's state is intact would be optimistic.
  * Halting rather than resetting preserves the RAM contents for a debugger.
  */
+/* cppcheck-suppress constParameterPointer
+ * The signature is fixed by FreeRTOS; const-qualifying it would no longer
+ * match the prototype the kernel calls through. */
 void vApplicationStackOverflowHook(TaskHandle_t task, char *name)
 {
     (void)task;
