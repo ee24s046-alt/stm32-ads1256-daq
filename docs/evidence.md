@@ -196,6 +196,33 @@ read completes before the next edge. If you capture only one timing screenshot,
 capture this one - the muxed mode has 2x margin and nobody doubts it; the
 wideband mode is where the design is actually being claimed to work.
 
+## 11. Real signal traces
+
+The most convincing artifact on this list, and the one most easily forgotten.
+Every other item proves the firmware is correct; this one proves the instrument
+measures the thing it was built to measure.
+
+```bash
+ads1256 capture --port /dev/ttyACM0 --seconds 20 --out run.npz
+ads1256 plot run.npz --out docs/img/traces-pressure-flow.png \
+    --channels 0,1,2 \
+    --labels "Pressure prox,Pressure dist,Flow" \
+    --seconds 6
+```
+
+Add `--loop "Diameter,Pressure prox"` for a pressure-diameter loop once the
+wall-tracking channel is in the capture - that single plot is the scientific
+output the whole instrument exists to produce.
+
+`--scale` applies a per-channel factor after the mV conversion, so pass your
+transducer sensitivities and `--unit mmHg` to plot in physical units rather than
+volts.
+
+The x-axis is built from the device's own `t_us` timestamps, with the TIM2
+rollover unwrapped - not from the sample index over a nominal rate. If a
+conversion was ever dropped, the gap shows in the trace rather than being
+silently closed up.
+
 ## Packaging it for someone who will not clone the repo
 
 `tools/make_evidence_pdf.py` builds `docs/evidence/project-evidence.pdf` - three

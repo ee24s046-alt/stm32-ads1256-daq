@@ -13,6 +13,8 @@ pip install -e .[dev]
 ads1256 capture --port /dev/ttyACM0 --seconds 300 --out run.npz --raw run.bin
 ads1256 verify  run.npz
 ads1256 noise   run.npz --channel 0 --plot noise.png
+ads1256 plot    run.npz --labels "Pressure prox,Pressure dist,Flow,Diameter" \
+                        --loop "Diameter,Pressure prox" --out traces.png
 ads1256 monitor --port /dev/ttyACM0
 ads1256 dsp --plot dsp.png
 ads1256 selftest

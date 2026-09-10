@@ -136,6 +136,91 @@ def _plot(codes, fs, args) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def cmd_plot(args) -> int:
+    """Plot captured signal traces - the measurement, not the noise floor.
+
+    `noise` characterises a shorted input. This plots what the instrument was
+    actually built to record: pressure, flow, wall position. For a reviewer it
+    is worth more than any amount of firmware detail, because it is the only
+    artifact that shows the thing doing its job.
+
+    The x-axis comes from the device's own t_us timestamps, not from the sample
+    index divided by a nominal rate. If the device ever dropped a conversion,
+    the gap appears in the trace rather than being silently closed up.
+    """
+    import numpy as np
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed - pip install 'ads1256-host[plot]'")
+        return 1
+
+    data = np.load(args.file)
+    codes = data["codes"]
+    t_us = data["t_us"].astype(np.int64)
+
+    # Unwrap the 32-bit TIM2 rollover (71.6 minutes) before using it as an axis.
+    dt = np.diff(t_us)
+    t_us = t_us + np.concatenate([[0], np.cumsum(np.where(dt < 0, 1 << 32, 0))])
+    t_s = (t_us - t_us[0]) / 1e6
+
+    channels = ([int(c) for c in args.channels.split(",")]
+                if args.channels else list(range(codes.shape[1])))
+    labels = (args.labels.split(",") if args.labels
+              else [f"ch{c}" for c in channels])
+    if len(labels) != len(channels):
+        raise SystemExit("error: --labels must give one name per channel")
+
+    scales = ([float(x) for x in args.scale.split(",")] if args.scale
+              else [1.0] * len(channels))
+    if len(scales) != len(channels):
+        raise SystemExit("error: --scale must give one factor per channel")
+
+    sel = np.ones(len(t_s), dtype=bool)
+    if args.start:
+        sel &= t_s >= args.start
+    if args.seconds:
+        sel &= t_s <= ((args.start or 0.0) + args.seconds)
+
+    # Volts, then whatever the caller's scale factor converts them to.
+    series = {}
+    for ch, label, k in zip(channels, labels, scales):
+        v = code_to_volts(codes[sel, ch], args.vref, args.pga)
+        series[label] = v * 1e3 * k if k != 1.0 else v * 1e3
+
+    npanel = 2 if args.loop else 1
+    fig, axes = plt.subplots(npanel, 1, figsize=(10, 4 * npanel + 1),
+                             squeeze=False)
+    ax = axes[0][0]
+
+    for label, y in series.items():
+        ax.plot(t_s[sel], y, lw=0.8, label=label)
+    ax.set(xlabel="time (s)", ylabel=args.unit,
+           title=args.title or f"Captured traces - {Path(args.file).name}")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    if args.loop:
+        xi, yi = (s_.strip() for s_ in args.loop.split(","))
+        if xi not in series or yi not in series:
+            raise SystemExit(f"error: --loop names must be among {list(series)}")
+        lax = axes[1][0]
+        lax.plot(series[xi], series[yi], lw=0.6)
+        lax.set(xlabel=f"{xi} ({args.unit})", ylabel=f"{yi} ({args.unit})",
+                title=f"{yi} vs {xi}")
+        lax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(args.out, dpi=140)
+    print(f"{int(sel.sum())} samples over {t_s[sel][-1] - t_s[sel][0]:.2f} s")
+    print(f"plot written to {args.out}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 def cmd_verify(args) -> int:
     """Independent check that a capture lost nothing.
 
@@ -431,6 +516,21 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--channel", type=int)
     n.add_argument("--plot", help="write a PNG here")
     n.set_defaults(func=cmd_noise)
+
+    pl = sub.add_parser("plot", help="plot captured signal traces")
+    pl.add_argument("file")
+    pl.add_argument("--out", default="traces.png")
+    pl.add_argument("--channels", help="e.g. 0,1,2")
+    pl.add_argument("--labels", help='e.g. "Pressure prox,Pressure dist,Flow"')
+    pl.add_argument("--scale", help="per-channel factor applied after mV, "
+                                    "e.g. mmHg per mV")
+    pl.add_argument("--unit", default="mV", help="y-axis label after scaling")
+    pl.add_argument("--title")
+    pl.add_argument("--start", type=float, help="skip this many seconds")
+    pl.add_argument("--seconds", type=float, help="window length")
+    pl.add_argument("--loop", help='X,Y label pair for a loop plot, '
+                                   'e.g. "Diameter,Pressure"')
+    pl.set_defaults(func=cmd_plot)
 
     v = sub.add_parser("verify", help="prove a capture lost nothing")
     v.add_argument("file")
