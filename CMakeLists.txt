@@ -88,7 +88,8 @@ else()
     FetchContent_Declare(freertos_kernel
         GIT_REPOSITORY https://github.com/FreeRTOS/FreeRTOS-Kernel.git
         GIT_TAG        V11.1.0
-        GIT_SHALLOW    TRUE)
+        GIT_SHALLOW    TRUE
+        SOURCE_SUBDIR  do-not-configure-this)
     FetchContent_MakeAvailable(freertos_kernel)
     set(FRK_DIR "${freertos_kernel_SOURCE_DIR}")
 endif()
